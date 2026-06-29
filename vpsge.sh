@@ -134,8 +134,8 @@ install_self() {
         chmod 755 "$target"
     else
         # 否则判定为通过 bash <(curl ...) 执行流，强制从直链拉取文件创建快捷命令
-        curl -fsSL --connect-timeout 10 "$VPSGE_REMOTE_URL" -o "$target" 2>/dev/null || \
-        wget -qO "$target" "$VPSGE_REMOTE_URL" 2>/dev/null
+        curl -fsSL --connect-timeout 10 "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh" -o "$target" 2>/dev/null || \
+        wget -qO "$target" "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh" 2>/dev/null
         
         if [[ -f "$target" ]]; then
             chmod 755 "$target"
