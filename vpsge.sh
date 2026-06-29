@@ -10,7 +10,7 @@ set -e
 # ────────────────────────────────────────────────────────────────
 #  全局直链配置（GitHub raw 地址，改仓库名时只需改这里）
 # ────────────────────────────────────────────────────────────────
-VPSGE_BASE_URL="https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh"
+VPSGE_BASE_URL="https://raw.githubusercontent.com/github19999/ojddjo/main"
 VPSGE_REMOTE_URL="${VPSGE_BASE_URL}/vpsge.sh"
 SCRIPT_VERSION="vpsge"
 
