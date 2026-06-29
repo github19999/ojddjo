@@ -4,7 +4,7 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (vpsge)
-#   版本号：vpsge-v9.2
+#   版本号：vpsge
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 /节点生成 / Realm 转发
 # ================================================================
 
@@ -13,8 +13,8 @@
 # ────────────────────────────────────────────────────────────────
 #  全局变量 & 直链配置
 # ────────────────────────────────────────────────────────────────
-VPSGE_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.2.sh"
-SCRIPT_VERSION="vpsge-v9.2"
+VPSGE_REMOTE_URL="https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh"
+SCRIPT_VERSION="vpsge"
 
 # ────────────────────────────────────────────────────────────────
 #  颜色 & 日志
