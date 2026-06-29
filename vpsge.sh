@@ -195,7 +195,7 @@ install_self() {
 
     # 无论哪种方式运行，统一从 GitHub 拉取最新版写入快捷命令
     if curl -fsSL --connect-timeout 10 "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh" -o "$target" 2>/dev/null || \
-       wget -qO "$target" "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.shL" 2>/dev/null; then
+       wget -qO "$target" "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh" 2>/dev/null; then
         chmod 755 "$target"
     fi
 
