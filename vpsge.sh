@@ -1,24 +1,88 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (vpsge)
-#   版本号：vpsge-v9.2
+#   版本号：vpsge
 #   主程序入口 — 加载所有模块后启动主菜单
 # ================================================================
 
 set -e
 
-# ── 模块加载 ──
-# 脚本所在目录（兼容直接运行和 source 运行）
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ────────────────────────────────────────────────────────────────
+#  全局直链配置（GitHub raw 地址，改仓库名时只需改这里）
+# ────────────────────────────────────────────────────────────────
+VPSGE_BASE_URL="https://raw.githubusercontent.com/github19999/ojddjo/main"
+VPSGE_REMOTE_URL="${VPSGE_BASE_URL}/vpsge.sh"
+SCRIPT_VERSION="vpsge"
 
-source "$SCRIPT_DIR/mod01_globals.sh"
-source "$SCRIPT_DIR/mod02_basic_security.sh"
-source "$SCRIPT_DIR/mod03_ssl.sh"
-source "$SCRIPT_DIR/mod04_install_service.sh"
-source "$SCRIPT_DIR/mod05_singbox_config.sh"
-source "$SCRIPT_DIR/mod06_service_mgmt.sh"
-source "$SCRIPT_DIR/mod07_gen_links.sh"
+# ────────────────────────────────────────────────────────────────
+#  模块本地安装目录
+# ────────────────────────────────────────────────────────────────
+VPSGE_MODULE_DIR="/usr/lib/vpsge"
 
+MODULES=(
+    mod01_globals.sh
+    mod02_basic_security.sh
+    mod03_ssl.sh
+    mod04_install_service.sh
+    mod05_singbox_config.sh
+    mod06_service_mgmt.sh
+    mod07_gen_links.sh
+)
+
+# ────────────────────────────────────────────────────────────────
+#  下载并加载所有模块
+#  支持两种运行方式：
+#    1) bash <(curl ...) — 从 GitHub 下载模块到本地后 source
+#    2) vpsge（已安装快捷命令）— 直接从本地 source
+# ────────────────────────────────────────────────────────────────
+load_modules() {
+    # 判断脚本是否以流方式运行（/dev/fd/ 或 bash 管道）
+    local is_pipe=false
+    if [[ "$0" == *"/dev/fd/"* || "$0" == "bash" || "$0" == "-bash" ]]; then
+        is_pipe=true
+    fi
+
+    # 如果模块目录不存在，或以流方式运行，则重新下载所有模块
+    if [[ "$is_pipe" == "true" ]] || [[ ! -d "$VPSGE_MODULE_DIR" ]]; then
+        echo "正在从 GitHub 下载脚本模块，请稍候..."
+        mkdir -p "$VPSGE_MODULE_DIR"
+
+        local dl_ok=true
+        for mod in "${MODULES[@]}"; do
+            local url="${VPSGE_BASE_URL}/${mod}"
+            local dest="${VPSGE_MODULE_DIR}/${mod}"
+            if curl -fsSL --connect-timeout 15 "$url" -o "$dest" 2>/dev/null; then
+                chmod 644 "$dest"
+            elif wget -qO "$dest" "$url" 2>/dev/null; then
+                chmod 644 "$dest"
+            else
+                echo "[ERROR] 下载失败: $url"
+                dl_ok=false
+            fi
+        done
+
+        if [[ "$dl_ok" == "false" ]]; then
+            echo "[ERROR] 部分模块下载失败，请检查网络或 GitHub 地址是否正确。"
+            exit 1
+        fi
+        echo "模块下载完成。"
+        echo ""
+    fi
+
+    # 从本地目录 source 所有模块
+    for mod in "${MODULES[@]}"; do
+        local f="${VPSGE_MODULE_DIR}/${mod}"
+        if [[ ! -f "$f" ]]; then
+            echo "[ERROR] 模块文件缺失: $f"
+            echo "请重新运行: bash <(curl -fsSL ${VPSGE_REMOTE_URL})"
+            exit 1
+        fi
+        # shellcheck source=/dev/null
+        source "$f"
+    done
+}
+
+load_modules
 
 # ────────────────────────────────────────────────────────────────
 #  全部执行 1→6
@@ -121,30 +185,22 @@ main_menu() {
 
 # ────────────────────────────────────────────────────────────────
 #  安装 vpsge 快捷命令
+#  将 vpsge.sh 复制到 /usr/bin/vpsge，此后直接输入 vpsge 即可启动
 # ────────────────────────────────────────────────────────────────
 install_self() {
     local target="/usr/bin/vpsge"
-    
-    # 如果当前正在 /usr/bin/vpsge 执行，则无需安装
+
+    # 如果当前已经在 /usr/bin/vpsge 运行，跳过
     [[ "$0" == "$target" ]] && return 0
 
-    # 判断是否为本地文件正常运行，若是则直接复制
-    if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
-        cp -f "$0" "$target"
+    # 无论哪种方式运行，统一从 GitHub 拉取最新版写入快捷命令
+    if curl -fsSL --connect-timeout 10 "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge-v1.sh" -o "$target" 2>/dev/null || \
+       wget -qO "$target" "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge-v1.shL" 2>/dev/null; then
         chmod 755 "$target"
-    else
-        # 否则判定为通过 bash <(curl ...) 执行流，强制从直链拉取文件创建快捷命令
-        curl -fsSL --connect-timeout 10 "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh" -o "$target" 2>/dev/null || \
-        wget -qO "$target" "$https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh" 2>/dev/null
-        
-        if [[ -f "$target" ]]; then
-            chmod 755 "$target"
-        fi
     fi
 
-    # 验证是否安装成功并刷新 hash
     if is_cmd_exist vpsge; then
-        log_success "已安装快捷命令: vpsge"
+        log_success "已安装快捷命令: vpsge  （下次直接输入 vpsge 即可）"
     fi
 }
 
@@ -154,3 +210,4 @@ install_self() {
 check_root
 detect_distro
 install_self
+main_menu
