@@ -16,7 +16,7 @@ update_script() {
     local target="/tmp/vpsge_update.sh"
     
     # 替换成指定参数链接 AAA/BBB
-    if curl -fsSL --connect-timeout 10 --max-time 30 "https://raw.githubusercontent.com/AAA/BBB/main/vpsge.sh" -o "$target"; then
+    if curl -fsSL --connect-timeout 10 --max-time 30 "https://raw.githubusercontent.com/github19999/ojddjo/main/vpsge.sh" -o "$target"; then
         if grep -q "vpsge" "$target"; then
             mv -f "$target" /usr/bin/vpsge
             chmod 755 /usr/bin/vpsge
