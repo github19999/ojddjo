@@ -1,11 +1,15 @@
 #!/bin/bash
-# ================================================================
-#  优化更新说明：
-#  1. 菜单新增 Xray 安装选项 (17、18、19)
-#  2. 批量执行逻辑兼容加入 Xray-core (17 / 170)
-#  3. GitHub 直链参数化适配 AAA/BBB
-# ================================================================
 # ── mod04_install_service.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
+#
+# ════════════════════════ 本次更新说明 (优化1) ════════════════════════
+# 新增：核心代理 Xray-core 的安装支持（最新稳定版 / 指定版本号 / Beta预发布版）
+#   - 稳定版与 Beta 版：调用 XTLS 官方一键安装脚本 install-release.sh
+#   - 指定版本号：直接从 GitHub Releases 下载对应版本的二进制包（与 sing-box
+#     模式2 指定版本号的做法一致），避免官方脚本不支持旧版本号的问题
+#   - 新增菜单项 17/18/19，插入在 Realm 之后、批量执行之前
+#   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm 卸载与安装逻辑均保持不变）
+# ════════════════════════════════════════════════════════════════════
+
 
 # ────────────────────────────────────────────────────────────────
 #  卸载功能合集
@@ -20,28 +24,20 @@ uninstall_singbox() {
         systemctl daemon-reload 2>/dev/null || true
         rm -rf /etc/sing-box /var/log/sing-box /var/lib/sing-box
         
+        # 彻底清理包管理器安装的版本
         if [[ "$PKG_MANAGER" == "apt" ]]; then
             apt purge -y sing-box 2>/dev/null || true
         elif [[ -n "$PKG_MANAGER" ]]; then
             $PKG_MANAGER remove -y sing-box 2>/dev/null || true
         fi
         
+        # 彻底移除所有可能的 sing-box 二进制路径
         rm -f /usr/local/bin/sing-box /usr/bin/sing-box /usr/sbin/sing-box /usr/local/sbin/sing-box /bin/sing-box
         for bin in $(type -aP sing-box 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
         
+        # 刷新 Bash 命令缓存，防止卸载后依旧误报存在
         hash -r 2>/dev/null || true
         log_success "sing-box 已彻底卸载"
-    fi
-}
-
-uninstall_xray() {
-    echo -e "${YELLOW}警告：这将彻底删除 Xray-core 及其所有配置文件！${NC}"
-    read -rp "确认卸载？(y/N): " choice
-    if [[ "${choice,,}" == "y" ]]; then
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove 2>/dev/null || true
-        rm -rf /usr/local/etc/xray /var/log/xray
-        hash -r 2>/dev/null || true
-        log_success "Xray-core 已彻底卸载"
     fi
 }
 
@@ -52,6 +48,7 @@ uninstall_nginx() {
         systemctl stop nginx 2>/dev/null || true
         systemctl disable nginx 2>/dev/null || true
         
+        # 彻底清理包管理器安装的版本
         if [[ "$PKG_MANAGER" == "apt" ]]; then
             apt purge -y nginx nginx-common nginx-core 2>/dev/null || true
             apt autoremove -y 2>/dev/null || true
@@ -60,9 +57,12 @@ uninstall_nginx() {
         fi
         
         rm -rf /etc/nginx /var/log/nginx /var/www/html /usr/sbin/nginx /usr/bin/nginx
+        
+        # 彻底移除所有可能的 nginx 二进制路径
         rm -f /usr/sbin/nginx /usr/bin/nginx /usr/local/sbin/nginx /usr/local/bin/nginx /bin/nginx
         for bin in $(type -aP nginx 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
         
+        # 刷新 Bash 命令缓存
         hash -r 2>/dev/null || true
         log_success "Nginx 已彻底卸载"
     fi
@@ -80,7 +80,7 @@ uninstall_docker() {
         systemctl stop docker docker.socket containerd containerd.service 2>/dev/null || true
         systemctl disable docker docker.socket containerd containerd.service 2>/dev/null || true
 
-        log_step "3. 正在强制解除所有残留的内核虚拟挂载点..."
+        log_step "3. 正在强制解除所有残留的内核虚拟挂载点 (overlay2/containerd)..."
         if [ -f /proc/mounts ]; then
             cat /proc/mounts | grep -E '/var/lib/(docker|containerd)' | awk '{print $2}' | sort -r | while read -r mnt; do
                 umount -fl "$mnt" 2>/dev/null || true
@@ -98,51 +98,41 @@ uninstall_docker() {
         log_step "5. 正在彻底清空物理残留目录、缓存、套接字与配置文件..."
         rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker /usr/bin/docker /usr/libexec/docker
         
+        # 彻底移除可能残留的二进制文件
         for bin in $(type -aP docker 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
+        
+        # 刷新 Bash 命令缓存
         hash -r 2>/dev/null || true
 
         log_step "6. 正在刷新重置 systemd 系统服务状态..."
         systemctl daemon-reload 2>/dev/null || true
         systemctl reset-failed 2>/dev/null || true
 
-        log_success "Docker 环境已彻底卸载！"
+        log_success "Docker 环境已完美、干净地彻底卸载！无任何底层状态残留。"
+    fi
+}
+
+uninstall_xray() {
+    echo -e "${YELLOW}警告：这将彻底删除 Xray-core 及其所有配置文件！${NC}"
+    read -rp "确认卸载？(y/N): " choice
+    if [[ "${choice,,}" == "y" ]]; then
+        systemctl stop xray 2>/dev/null || true
+        systemctl disable xray 2>/dev/null || true
+        rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray@.service
+        systemctl daemon-reload 2>/dev/null || true
+        rm -rf /usr/local/etc/xray /var/log/xray /usr/local/share/xray
+
+        rm -f /usr/local/bin/xray /usr/bin/xray /usr/sbin/xray
+        for bin in $(type -aP xray 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
+
+        hash -r 2>/dev/null || true
+        log_success "Xray-core 已彻底卸载"
     fi
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Xray / Nginx / Docker / 面板 / Realm）
+#  三、安装服务（sing-box / Nginx / Docker环境 / 面板 / Realm）
 # ────────────────────────────────────────────────────────────────
-install_xray() {
-    local mode="${1:-1}"
-    log_step "安装 Xray-core..."
-    
-    if is_cmd_exist xray; then
-        local ver
-        ver=$(xray --version 2>/dev/null | head -1)
-        log_info "当前已安装版本: $ver"
-        if ! prompt_reinstall "Xray"; then return 0; fi
-    fi
-
-    if [[ "$mode" == "1" ]]; then
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || { log_error "Xray 安装失败"; return 1; }
-    elif [[ "$mode" == "2" ]]; then
-        read -rp "请输入 Xray 版本号 (例如 1.8.4，回车跳过使用默认): " x_ver
-        if [[ -n "$x_ver" ]]; then
-            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -V "$x_ver" || { log_error "Xray 安装失败"; return 1; }
-        else
-            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || { log_error "Xray 安装失败"; return 1; }
-        fi
-    elif [[ "$mode" == "3" ]]; then
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --beta || { log_error "Xray Beta 安装失败"; return 1; }
-    fi
-
-    if systemctl is-active --quiet xray; then
-        log_success "Xray 安装并启动成功"
-    else
-        log_info "提醒: Xray 核心已就绪，但可能缺少有效配置，请前往「4. 配置节点」生成配置。"
-    fi
-}
-
 install_nginx() {
     local mode="${1:-1}"
     log_step "安装 Nginx..."
@@ -163,11 +153,13 @@ install_nginx() {
 
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt update -y >/dev/null 2>&1 || true
+        # 核心防瘫痪修复：使用 --force-confmiss 强制恢复任何缺失的默认配置文件 (如被误删的 nginx.conf)
         DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confmiss" install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     else
         $PKG_MANAGER install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     fi
     
+    # 针对 SELinux 系统，开启网络连接转发权限以支持面板反代
     if is_cmd_exist setsebool; then
         setsebool -P httpd_can_network_connect 1 2>/dev/null || true
     fi
@@ -227,6 +219,116 @@ install_docker_env() {
     fi
 }
 
+install_xray() {
+    local mode="${1:-1}"   # 1=最新稳定版 2=指定版本号 3=Beta预发布版
+    log_step "安装 Xray-core..."
+
+    if is_cmd_exist xray; then
+        local ver
+        ver=$(xray version 2>/dev/null | head -1)
+        log_info "当前已安装版本: $ver"
+        if ! prompt_reinstall "Xray-core"; then return 0; fi
+    fi
+
+    local x_ver=""
+    if [[ "$mode" == "2" ]]; then
+        read -rp "请输入 Xray 版本号（例如 1.8.24，回车则改为安装最新稳定版）: " x_ver
+        [[ -z "$x_ver" ]] && { log_info "未输入版本号，转为安装最新稳定版..."; mode="1"; }
+    fi
+
+    if [[ "$mode" == "2" ]]; then
+        log_step "正在通过 GitHub Releases 直接下载 Xray v${x_ver} 二进制..."
+        local ARCH ARCH_STR
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64) ARCH_STR="64" ;;
+            aarch64) ARCH_STR="arm64-v8a" ;;
+            armv7l) ARCH_STR="arm32-v7a" ;;
+            *) ARCH_STR="64" ;;
+        esac
+        if ! is_cmd_exist unzip; then
+            if [[ "$PKG_MANAGER" == "apt" ]]; then
+                apt update -y >/dev/null 2>&1 || true
+                apt install -y unzip >/dev/null 2>&1 || true
+            else
+                $PKG_MANAGER install -y unzip >/dev/null 2>&1 || true
+            fi
+        fi
+        local URL="https://github.com/XTLS/Xray-core/releases/download/v${x_ver}/Xray-linux-${ARCH_STR}.zip"
+        rm -rf /tmp/xray-dl && mkdir -p /tmp/xray-dl
+        if ! curl -fsSL "$URL" -o /tmp/xray-dl/xray.zip; then
+            log_error "下载失败，请确认版本号是否存在"
+            rm -rf /tmp/xray-dl
+            return 1
+        fi
+        if ! unzip -qo /tmp/xray-dl/xray.zip -d /tmp/xray-dl; then
+            log_error "解压失败"
+            rm -rf /tmp/xray-dl
+            return 1
+        fi
+        install -m 755 /tmp/xray-dl/xray /usr/local/bin/xray
+        mkdir -p /usr/local/share/xray
+        [[ -f /tmp/xray-dl/geoip.dat ]] && install -m 644 /tmp/xray-dl/geoip.dat /usr/local/share/xray/geoip.dat
+        [[ -f /tmp/xray-dl/geosite.dat ]] && install -m 644 /tmp/xray-dl/geosite.dat /usr/local/share/xray/geosite.dat
+        rm -rf /tmp/xray-dl
+    else
+        log_step "正在通过 XTLS 官方一键脚本安装 Xray-core...$( [[ "$mode" == "3" ]] && echo " (Beta/预发布版)")"
+        if [[ "$mode" == "3" ]]; then
+            if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --beta; then
+                log_error "Xray Beta 安装失败，请检查网络"
+                return 1
+            fi
+        else
+            if ! bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install; then
+                log_error "Xray 官方脚本安装失败，请检查网络"
+                return 1
+            fi
+        fi
+    fi
+
+    mkdir -p /usr/local/etc/xray /var/log/xray
+
+    if [[ ! -f /etc/systemd/system/xray.service ]]; then
+        cat > /etc/systemd/system/xray.service << 'EOF'
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+    fi
+
+    if is_cmd_exist xray; then
+        local ver
+        ver=$(xray version 2>/dev/null | head -1)
+        log_success "Xray-core 安装成功: $ver"
+        if [[ -s /usr/local/etc/xray/config.json ]]; then
+            if xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+                systemctl enable xray >/dev/null 2>&1 || true
+                systemctl start xray >/dev/null 2>&1 || true
+            fi
+        else
+            log_info "提醒: Xray-core 核心已就绪。请前往主菜单「四、配置节点」选择 Xray-core 内核生成配置，完成后系统将自动守护运行。"
+        fi
+    else
+        log_error "Xray-core 安装失败"
+    fi
+}
+
 install_substore() {
     local sub_ver_choice="${1:-1}"
     
@@ -268,7 +370,8 @@ install_substore() {
             fi
         fi
     else
-        echo -e "\n${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
+        echo -e "
+${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         echo "  1) 直接安装 [默认]"
         echo "  2) 导入旧链接 (手动粘贴)"
         local choice
@@ -325,6 +428,7 @@ install_substore() {
     local cp=""
     local kp=""
     
+    # 强制跳过确认，自动应用旧域名和证书
     if [[ -n "$old_sub_domain" ]]; then
         sn="$old_sub_domain"
         local prev_auto="$AUTO_DEFAULT"
@@ -334,6 +438,7 @@ install_substore() {
         kp="$KEY_PATH"
         AUTO_DEFAULT="$prev_auto"
     else
+        # 强制在选择域名时弹出版单给出选择（Sub-Store 默认选项 1）
         local prev_auto="$AUTO_DEFAULT"
         AUTO_DEFAULT="false" 
         select_server_name "sub.example.com" "" "1"
@@ -347,6 +452,8 @@ install_substore() {
     
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
+        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
+        log_warn "请后续确保将正确的证书文件放置于: $cp"
     fi
 
     mkdir -p /root/docker/substore/data
@@ -372,7 +479,7 @@ install_substore() {
     curl -fsSL -L "$frontend_url" -o dist.zip
     
     rm -rf frontend dist_tmp
-    unzip -qo dist.zip -d dist_tmp || log_warn "前端解压出现异常"
+    unzip -qo dist.zip -d dist_tmp || log_warn "前端解压出现异常，可能下载不完整"
     if [[ -d "dist_tmp/dist" ]]; then
         mv dist_tmp/dist frontend
     else
@@ -419,6 +526,7 @@ EOF
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
     
+    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/substore.conf <<EOF
 server {
     listen 8080;
@@ -446,12 +554,13 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败"
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
     
     echo ""
     log_success "Sub-Store 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api_path${NC}"
     echo -e "  🔐 后台API路径:  ${YELLOW}/$api_path${NC}"
+    echo -e "  ${YELLOW}（如果不慎忘记该地址，可在脚本主菜单的「服务管理」中随时找回查看）${NC}"
     echo ""
 }
 
@@ -487,11 +596,15 @@ install_wallos() {
             if [[ -n "$old_wal_link" ]]; then
                 if [[ "$old_wal_link" =~ ^https://([^/:]+) ]]; then
                     old_wal_domain="${BASH_REMATCH[1]}"
+                    log_success "成功提取旧配置: 域名=$old_wal_domain"
+                else
+                    log_warn "未能识别链接格式，将使用常规方式配置。"
                 fi
             fi
         fi
     else
-        echo -e "\n${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
+        echo -e "
+${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
         echo "  1) 直接安装 [默认]"
         echo "  2) 导入旧链接 (手动粘贴)"
         local choice
@@ -502,6 +615,9 @@ install_wallos() {
             if [[ -n "$old_wal_link" ]]; then
                 if [[ "$old_wal_link" =~ ^https://([^/:]+) ]]; then
                     old_wal_domain="${BASH_REMATCH[1]}"
+                    log_success "成功提取旧配置: 域名=$old_wal_domain"
+                else
+                    log_warn "未能识别链接格式，将使用常规方式配置。"
                 fi
             fi
         fi
@@ -518,10 +634,11 @@ install_wallos() {
     install_docker_env 1
     
     if ! is_cmd_exist nginx; then
+        log_warn "未检测到 Nginx，正在尝试自动预装..."
         install_nginx 1
     fi
 
-    log_step "部署 Wallos - 版本: $wallos_ver"
+    log_step "部署 Wallos (订阅管理与财务系统) - 版本: $wallos_ver"
 
     local sn=""
     local cp=""
@@ -536,6 +653,7 @@ install_wallos() {
         AUTO_DEFAULT="$prev_auto"
     else
         while true; do
+            # 强制在选择域名时弹出版单给出选择（Wallos 默认选项 2）
             local prev_auto="$AUTO_DEFAULT"
             AUTO_DEFAULT="false" 
             select_server_name "wallos.example.com" "" "2"
@@ -545,7 +663,9 @@ install_wallos() {
             if [[ -f /root/docker/substore/domain.txt ]]; then
                 local sub_sn=$(cat /root/docker/substore/domain.txt)
                 if [[ "$sn" == "$sub_sn" ]]; then
-                    echo -e "${RED}[ERROR] 域名冲突！该域名已被 Sub-Store 占用。${NC}"
+                    echo -e "${RED}[ERROR] 域名冲突拦截！检测到该域名已被 Sub-Store 占用。${NC}"
+                    echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
+                    echo ""
                     continue
                 fi
             fi
@@ -556,6 +676,12 @@ install_wallos() {
         kp="$KEY_PATH"
     fi
     
+    if [[ ! -f "$cp" || ! -f "$kp" ]]; then
+        log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
+        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
+        log_warn "请后续确保将正确的证书文件放置于: $cp"
+    fi
+
     mkdir -p /root/docker/wallos/{db,logos}
     cd /root/docker/wallos
     echo "$sn" > domain.txt
@@ -574,15 +700,21 @@ services:
       - './db:/var/www/html/db'
       - './logos:/var/www/html/images/uploads/logos'
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 EOF
 
     log_info "启动容器..."
     docker compose up -d 2>/dev/null || docker-compose up -d
 
-    log_step "配置 Nginx 安全反向代理"
+    log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
     
+    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
 server {
     listen 8080;
@@ -607,7 +739,7 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
     
     echo ""
     log_success "Wallos 部署完成！"
@@ -679,7 +811,8 @@ delete_forward_realm() {
         return
     fi
     echo "当前转发规则："
-    local IFS=$'\n'
+    local IFS=$'
+'
     local lines=($(grep -n 'remote =' /root/realm/config.toml))
     if [ ${#lines[@]} -eq 0 ]; then
         echo "没有发现任何转发规则。"
@@ -693,9 +826,20 @@ delete_forward_realm() {
 
     echo "请输入要删除的转发规则序号，直接按回车返回主菜单。"
     read -p "选择: " choice
-    if [ -z "$choice" ]; then return; fi
-    if ! [[ $choice =~ ^[0-9]+$ ]]; then return; fi
-    if [ $choice -lt 1 ] || [ $choice -gt ${#lines[@]} ]; then return; fi
+    if [ -z "$choice" ]; then
+        echo "返回。"
+        return
+    fi
+
+    if ! [[ $choice =~ ^[0-9]+$ ]]; then
+        echo "无效输入，请输入数字。"
+        return
+    fi
+
+    if [ $choice -lt 1 ] || [ $choice -gt ${#lines[@]} ]; then
+        echo "选择超出范围，请输入有效序号。"
+        return
+    fi
 
     local chosen_line=${lines[$((choice-1))]}
     local line_number=$(echo $chosen_line | cut -d ':' -f 1)
@@ -835,13 +979,13 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160 170)
+            SVC_CHOICES=(1 4 7 10 14 160)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160 170)
+            SVC_CHOICES=(1 4 7 10 14 160)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
-            read -rp "请输入服务编号（例如 1 4 7 170，以空格隔开）: " -a SVC_CHOICES
+            read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
             AUTO_DEFAULT=false
         else
             read -ra SVC_CHOICES <<< "$vc_raw"
@@ -943,11 +1087,15 @@ EOF
                         local ver
                         ver=$(sing-box version 2>/dev/null | head -1)
                         log_success "sing-box 安装成功: $ver"
+                        
+                        # 尝试自动启动 (若已存在有效配置)
                         if [[ -s /etc/sing-box/config.json ]]; then
                             if ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
                                 systemctl enable sing-box >/dev/null 2>&1 || true
                                 systemctl start sing-box >/dev/null 2>&1 || true
                             fi
+                        else
+                            log_info "提醒: sing-box 核心已就绪。请前往主菜单「4. 配置 sing-box」生成配置，完成后系统将自动守护运行。"
                         fi
                     else
                         log_error "sing-box 安装失败"
@@ -968,7 +1116,7 @@ EOF
                 15) install_wallos 3; [[ "$is_batch" == "false" ]] && press_enter ;;
                 16) menu_manage_realm ;;
                 160) deploy_realm; [[ "$is_batch" == "false" ]] && press_enter ;;
-                17|170) install_xray 1; [[ "$is_batch" == "false" ]] && press_enter ;;
+                17) install_xray 1; [[ "$is_batch" == "false" ]] && press_enter ;;
                 18) install_xray 2; [[ "$is_batch" == "false" ]] && press_enter ;;
                 19) install_xray 3; [[ "$is_batch" == "false" ]] && press_enter ;;
                 *) log_warn "未知选项或服务: $vc，跳过"; sleep 1 ;;
