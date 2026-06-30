@@ -937,18 +937,47 @@ build_xray_config() {
 
     local port uuid sn shortid privkey="" pubkey="" xpath=""
 
-    # Xray REALITY 节点完全独立于 sing-box，不读取/不依赖任何通过粘贴旧节点链接
-    # 解析出的 sing-box REALITY 变量（OLD_VLESS_REALITY_*），始终全新交互式询问
-    ask_val    port "listen_port（监听端口，建议 443）" "443"
-    ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
-    ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
+    # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
+    # OLD_VLESS_REALITY_* 作为默认值；选择「2) 否，生成全新配置」时
+    # （包括 import_choice 为空/默认的情况）一律不检测、不读取任何外部链接，纯新生成。
+    if [[ "${import_choice:-2}" == "1" ]]; then
+        ask_val    port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
+        ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
+        ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
 
-    log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
-    gen_xray_reality_keypair
-    privkey="$XRAY_PRIVKEY"
-    pubkey="$XRAY_PUBKEY"
+        if [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
+            echo -e "  ${YELLOW}⚠ 检测到您导入的 REALITY 节点链接中只含 PublicKey（公钥），${NC}"
+            echo -e "  ${YELLOW}REALITY 服务端必须使用与之配对的 PrivateKey（私钥）才能让原节点继续可用。${NC}"
+            read -rp "  > 请粘贴原 PrivateKey (若留空，则生成新密钥对，原节点将失效): " privkey
+        fi
 
-    shortid=$(openssl rand -hex 8)
+        if [[ -n "$privkey" && ${#privkey} -eq 43 ]]; then
+            pubkey="${OLD_VLESS_REALITY_PBK:-}"
+            [[ -z "$pubkey" ]] && read -rp "  > 请输入对应的 PublicKey (公钥): " pubkey
+        else
+            log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
+            gen_xray_reality_keypair
+            privkey="$XRAY_PRIVKEY"
+            pubkey="$XRAY_PUBKEY"
+        fi
+
+        if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
+            shortid="$OLD_VLESS_REALITY_SID"
+        else
+            shortid=$(openssl rand -hex 8)
+        fi
+    else
+        ask_val    port "listen_port（监听端口，建议 443）" "443"
+        ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+        ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
+
+        log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
+        gen_xray_reality_keypair
+        privkey="$XRAY_PRIVKEY"
+        pubkey="$XRAY_PUBKEY"
+
+        shortid=$(openssl rand -hex 8)
+    fi
 
     mkdir -p /usr/local/etc/xray /var/log/xray
 
