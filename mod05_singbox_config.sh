@@ -945,15 +945,24 @@ build_xray_config() {
         ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
         ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
 
-        if [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
+        if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
+            # 私钥已直接从旧链接的 tag 中提取出来（本面板生成的 Xray REALITY 链接
+            # 会把 PrivateKey 编码进 tag），无需用户手动粘贴，原样还原
+            privkey="$OLD_VLESS_REALITY_PK"
+            pubkey="$OLD_VLESS_REALITY_PBK"
+            echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
+        elif [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
             echo -e "  ${YELLOW}⚠ 检测到您导入的 REALITY 节点链接中只含 PublicKey（公钥），${NC}"
             echo -e "  ${YELLOW}REALITY 服务端必须使用与之配对的 PrivateKey（私钥）才能让原节点继续可用。${NC}"
             read -rp "  > 请粘贴原 PrivateKey (若留空，则生成新密钥对，原节点将失效): " privkey
-        fi
-
-        if [[ -n "$privkey" && ${#privkey} -eq 43 ]]; then
-            pubkey="${OLD_VLESS_REALITY_PBK:-}"
-            [[ -z "$pubkey" ]] && read -rp "  > 请输入对应的 PublicKey (公钥): " pubkey
+            if [[ -n "$privkey" && ${#privkey} -eq 43 ]]; then
+                pubkey="$OLD_VLESS_REALITY_PBK"
+            else
+                log_info "未提供有效私钥，正在通过 Xray 生成全新 REALITY 密钥对..."
+                gen_xray_reality_keypair
+                privkey="$XRAY_PRIVKEY"
+                pubkey="$XRAY_PUBKEY"
+            fi
         else
             log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
             gen_xray_reality_keypair
@@ -1175,16 +1184,20 @@ EOF
     esac
 
     # 保存元数据，供 mod07 生成 Xray 订阅链接时使用
+    # PRIVATE_KEY 会被 mod07 编码进生成链接的 tag(#fragment) 末尾，下次导入该链接时
+    # 即可直接从 tag 中还原私钥，无需手动粘贴（与 sing-box REALITY 节点的做法一致）
     mkdir -p /etc/xray
     {
         echo "PORT=$port"
         echo "UUID=$uuid"
         echo "SNI=$sn"
         echo "PUBLIC_KEY=$pubkey"
+        echo "PRIVATE_KEY=$privkey"
         echo "SHORT_ID=$shortid"
         echo "VARIANT=$variant"
         [[ -n "$xpath" ]] && echo "XHTTP_PATH=$xpath"
     } > /etc/xray/node_meta.conf
+    chmod 600 /etc/xray/node_meta.conf
 
     log_success "Xray 配置文件已写入: /usr/local/etc/xray/config.json"
     echo ""
@@ -1367,7 +1380,11 @@ for line in input_text.splitlines():
                     if "pbk" in qs: vars_out["OLD_VLESS_REALITY_PBK"] = clean_val(qs["pbk"][0])
                     if "sid" in qs: vars_out["OLD_VLESS_REALITY_SID"] = clean_val(qs["sid"][0])
                     
-                    m = re.search(r'vless-reality-in-([A-Za-z0-9_-]+)', tag)
+                    # x25519 私钥 base64url 编码后固定为 43 个字符（无 padding）。
+                    # 不再依赖固定的 "vless-reality-in-" 前缀，兼容 sing-box 与 Xray
+                    # 两种内核生成的 tag（如 "xray-reality-vision-xxxx"），只要 tag
+                    # 末尾是一段 43 位 base64url 字符串即视为内嵌的 PrivateKey。
+                    m = re.search(r'-([A-Za-z0-9_-]{43})$', tag)
                     if m:
                         vars_out["OLD_VLESS_REALITY_PK"] = clean_val(m.group(1))
 
