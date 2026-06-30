@@ -1061,7 +1061,7 @@ build_xray_config() {
 EOF
             ;;
         3)
-            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "/$(openssl rand -hex 6)"
+            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1113,7 +1113,7 @@ EOF
 EOF
             ;;
         4)
-            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "/$(openssl rand -hex 6)"
+            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1379,6 +1379,9 @@ for line in input_text.splitlines():
                     if sni: vars_out["OLD_VLESS_REALITY_SNI"] = clean_val(sni)
                     if "pbk" in qs: vars_out["OLD_VLESS_REALITY_PBK"] = clean_val(qs["pbk"][0])
                     if "sid" in qs: vars_out["OLD_VLESS_REALITY_SID"] = clean_val(qs["sid"][0])
+                    # xhttp+REALITY 节点（Xray 协议3/4）的 path 参数，导入时需还原，
+                    # 否则即便 uuid/port/sni/密钥都对上，path 不一致仍然无法连接
+                    if "path" in qs: vars_out["OLD_VLESS_REALITY_PATH"] = clean_val(qs["path"][0])
                     
                     # x25519 私钥 base64url 编码后固定为 43 个字符（无 padding）。
                     # 不再依赖固定的 "vless-reality-in-" 前缀，兼容 sing-box 与 Xray
