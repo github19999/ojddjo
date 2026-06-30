@@ -368,8 +368,9 @@ generate_links_xray() {
     # shellcheck disable=SC1090
     source "$META"
 
+    # 连接地址必须是服务器真实 IP，不能用 SNI 域名（SNI 仅用于 TLS 握手伪装，
+    # 用域名会导致客户端实际连接到域名解析出的第三方服务器而不是本机，造成不通）
     local addr="$SERVER_IP"
-    [[ -n "${SNI:-}" ]] && addr="$SNI"
 
     local tag="" link="" params=""
     case "${VARIANT:-1}" in
