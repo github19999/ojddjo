@@ -399,6 +399,11 @@ generate_links_xray() {
     esac
 
     local tag_enc
+    # 把 PrivateKey 编码进 tag(#fragment) 末尾：下次把这条链接粘贴回面板「导入旧节点」时，
+    # mod05 的解析器会自动从 tag 末尾的 43 位 base64url 串还原私钥，无需再手动粘贴
+    if [[ -n "${PRIVATE_KEY:-}" ]]; then
+        tag="${tag}-${PRIVATE_KEY}"
+    fi
     tag_enc=$(urlencode "$tag")
     link="vless://${UUID}@${addr}:${PORT}?${params}#${tag_enc}"
 
