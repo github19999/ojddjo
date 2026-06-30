@@ -182,7 +182,9 @@ for ib in inbounds:
             'net':net,'type':'none','host':sni,
             'path':ws_path,'tls':tls_s,'sni':sni,'fp':'chrome'
         }
-        enc = base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip('=')
+        # VMess 分享链接规范使用标准 base64（含 + / 字符与 = 填充），而非 urlsafe 变体；
+        # 之前用 urlsafe_b64encode 会导致部分客户端/重新导入解析失败
+        enc = base64.b64encode(json.dumps(obj).encode()).decode()
         links.append(f"vmess://{enc}")
 
         cp = {
