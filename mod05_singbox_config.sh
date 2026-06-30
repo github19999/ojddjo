@@ -937,31 +937,18 @@ build_xray_config() {
 
     local port uuid sn shortid privkey="" pubkey="" xpath=""
 
-    ask_val    port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
-    ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
-    ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
+    # Xray REALITY 节点完全独立于 sing-box，不读取/不依赖任何通过粘贴旧节点链接
+    # 解析出的 sing-box REALITY 变量（OLD_VLESS_REALITY_*），始终全新交互式询问
+    ask_val    port "listen_port（监听端口，建议 443）" "443"
+    ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+    ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
 
-    if [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
-        echo -e "  ${YELLOW}⚠ 检测到您导入了外部 REALITY 节点链接，但其中不包含 PrivateKey(私钥)！${NC}"
-        echo -e "  ${YELLOW}为保证原节点可用，您必须手动提供与原节点对应的 PrivateKey。${NC}"
-        read -rp "  > 请粘贴原 PrivateKey (若留空，则生成新密钥对，原节点将失效): " privkey
-    fi
+    log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
+    gen_xray_reality_keypair
+    privkey="$XRAY_PRIVKEY"
+    pubkey="$XRAY_PUBKEY"
 
-    if [[ -z "$privkey" || ${#privkey} -ne 43 ]]; then
-        log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
-        gen_xray_reality_keypair
-        privkey="$XRAY_PRIVKEY"
-        pubkey="$XRAY_PUBKEY"
-    else
-        pubkey="${OLD_VLESS_REALITY_PBK:-}"
-        [[ -z "$pubkey" ]] && read -rp "  > 请输入对应的 PublicKey (公钥): " pubkey
-    fi
-
-    if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
-        shortid="$OLD_VLESS_REALITY_SID"
-    else
-        shortid=$(openssl rand -hex 8)
-    fi
+    shortid=$(openssl rand -hex 8)
 
     mkdir -p /usr/local/etc/xray /var/log/xray
 
@@ -1260,8 +1247,16 @@ for line in input_text.splitlines():
     if not line: continue
     try:
         if line.startswith("vmess://"):
-            b64_str = line[8:]
-            obj = json.loads(base64.b64decode(b64_str).decode("utf-8"))
+            b64_str = line[8:].strip()
+            # 补齐缺失的 base64 padding（'='），并兼容标准/urlsafe 两种字符集，
+            # 避免因 padding 缺失或字符集不一致导致整条链接解析失败而被静默跳过
+            _missing_pad = len(b64_str) % 4
+            if _missing_pad:
+                b64_str += "=" * (4 - _missing_pad)
+            try:
+                obj = json.loads(base64.b64decode(b64_str).decode("utf-8"))
+            except Exception:
+                obj = json.loads(base64.urlsafe_b64decode(b64_str).decode("utf-8"))
             port = obj.get("port")
             uid = obj.get("id")
             net = obj.get("net")
