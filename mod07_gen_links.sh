@@ -1,7 +1,9 @@
 #!/bin/bash
 # ── mod07_gen_links.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 (优化3) ════════════════════════
+# ════════════════════════ 历史更新说明 ════════════════════════
+#
+# ── 优化(原优化3) ──────────────────────────────────────────────
 # 新增：生成节点链接时，sing-box 与 Xray-core 节点分类显示
 #   - 原 generate_links() 中针对 sing-box 的全部逻辑原封不动地抽到
 #     generate_links_singbox()，行为与文件输出路径完全不变
@@ -14,6 +16,20 @@
 #     "sing-box 节点" 分区，若检测到 Xray 配置则展示 "Xray-core 节点"
 #     分区，两者互不影响，缺一不报错（仅跳过并提示）
 #   - 菜单新增第 6/7 项查看 Xray 订阅文件，原有 1-5 项功能不变
+#
+# ── 优化1：sing-box REALITY 节点 address 使用服务器 IP ─────────
+#   - generate_links_singbox() Python 段中，REALITY inbound 的
+#     addr 强制使用 SERVER_IP，不再用 SNI 域名作为连接地址
+#     （SNI 仅用于 TLS 握手伪装，用域名会连到第三方服务器）
+#   - is_ip() 判断移到 VLESS 处理段外层，reality_on 时直接
+#     addr = SERVER_IP，确保链接 address 始终是真实服务器 IP
+#
+# ── 优化2/3：generate_links_xray() 新增 VARIANT 5/6 支持 ──────
+#   VARIANT=5 → xray-reality-tcp-vision（无防偷跑+有流控）
+#               vless://UUID@IP:PORT?...flow=xtls-rprx-vision...
+#   VARIANT=6 → xray-xhttp-plain（xhttp 裸协议，无 REALITY/TLS）
+#               vless://UUID@IP:PORT?type=xhttp&security=none...
+#   两种新变体的 tag 末尾不再附加 PRIVATE_KEY（裸协议/无私钥场景）
 # ════════════════════════════════════════════════════════════════════
 
 # ────────────────────────────────────────────────────────────────
@@ -68,6 +84,9 @@ def get_sni(tls, addr):
 def strip_comments(text):
     return re.sub(r'(?<![:/])//[^\n]*', '', text)
 
+def is_ip(s):
+    return bool(re.match(r'^[\d.]+$', str(s)) or re.match(r'^[0-9a-fA-F:]+$', str(s)))
+
 with open(CONFIG_FILE) as f:
     raw = f.read()
 
@@ -93,16 +112,20 @@ for ib in inbounds:
         continue
 
     listen = ib.get('listen', '::')
+    # ── 优化1：address 始终使用服务器真实 IP ──────────────────────────
+    # listen 为 "::" / "0.0.0.0" 时强制用 SERVER_IP，
+    # 即便是 REALITY 节点也不能用 SNI 域名作为连接地址，
+    # 否则客户端会连接到域名解析出的第三方服务器而非本机。
     addr = SERVER_IP if listen in ('::', '0.0.0.0') else listen
 
     tls = ib.get('tls', {})
     tls_on = tls.get('enabled', False)
     sni = get_sni(tls, addr)
 
-    def is_ip(s):
-        import re
-        return bool(re.match(r'^[\d.]+$', s) or re.match(r'^[0-9a-fA-F:]+$', s))
-    if tls_on and sni and not is_ip(sni):
+    # 仅非 REALITY 节点且 SNI 是域名（非 IP）时才用 SNI 替换 addr
+    reality = tls.get('reality', {})
+    reality_on = reality.get('enabled', False)
+    if not reality_on and tls_on and sni and not is_ip(sni):
         addr = sni
 
     users = ib.get('users', [])
@@ -116,9 +139,6 @@ for ib in inbounds:
         uuid  = u.get('uuid', '')
         flow  = u.get('flow', '')
 
-        reality = tls.get('reality', {})
-        reality_on = reality.get('enabled', False)
-        
         display_tag = tag
         if reality_on and re.search(r'-[A-Za-z0-9_-]+$', tag):
             display_tag = tag.rsplit('-', 1)[0]
@@ -138,6 +158,7 @@ for ib in inbounds:
                 pass
             sid_val = reality.get('short_id', [''])
             sid = sid_val[0] if isinstance(sid_val, list) else sid_val
+            # REALITY 节点 addr 强制使用 SERVER_IP（已在上方 addr 赋值逻辑中保证）
             params = f"encryption=none&flow={flow}&security=reality&sni={sni}&fp=chrome&pbk={urlencode(pbk)}&sid={sid}&type=tcp&headerType=none"
         else:
             sec = 'tls' if tls_on else 'none'
@@ -392,6 +413,18 @@ generate_links_xray() {
             tag="xray-reality-xhttp-anti"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
+        5)
+            # VARIANT=5：原版REALITY + 无防偷跑 + 有流控（参考节点2.conf 结构）
+            # 直接 0.0.0.0 监听，带 xtls-rprx-vision 流控，无 dokodemo-door
+            tag="xray-reality-tcp-vision"
+            params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
+            ;;
+        6)
+            # VARIANT=6：xhttp 裸协议（无 REALITY，无 TLS），套 CDN 或直连
+            # 无私钥，tag 末尾不附加 PRIVATE_KEY
+            tag="xray-xhttp-plain"
+            params="encryption=none&security=none&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
+            ;;
         *)
             log_error "未知的 Xray 节点变体: ${VARIANT:-}"
             return 1
@@ -401,7 +434,8 @@ generate_links_xray() {
     local tag_enc
     # 把 PrivateKey 编码进 tag(#fragment) 末尾：下次把这条链接粘贴回面板「导入旧节点」时，
     # mod05 的解析器会自动从 tag 末尾的 43 位 base64url 串还原私钥，无需再手动粘贴
-    if [[ -n "${PRIVATE_KEY:-}" ]]; then
+    # VARIANT=6（xhttp 裸协议）无 REALITY 私钥，不附加
+    if [[ -n "${PRIVATE_KEY:-}" && "${VARIANT}" != "6" ]]; then
         tag="${tag}-${PRIVATE_KEY}"
     fi
     tag_enc=$(urlencode "$tag")
@@ -419,6 +453,9 @@ generate_links_xray() {
     echo "[✓] Base64订阅 (V2RayN): /usr/local/etc/xray/subscription.b64"
     if [[ "${VARIANT}" == "3" || "${VARIANT}" == "4" ]]; then
         echo "[i] 提示: xhttp+REALITY 节点暂不支持自动生成 Clash/Mihomo 配置，请使用支持 xhttp 的客户端导入上方链接"
+    fi
+    if [[ "${VARIANT}" == "6" ]]; then
+        echo "[i] 提示: xhttp 裸协议节点请配合 CDN（如 Cloudflare）使用，或仅用于本地/内网直连"
     fi
     echo ""
     echo "$link"
