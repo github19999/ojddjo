@@ -1,7 +1,21 @@
 #!/bin/bash
 # ── mod07_gen_links.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 ════════════════════════
+# ════════════════════════ 本次更新说明（最新） ════════════════════════
+# 配套 mod05 优化1：Xray 菜单更名重排后，generate_links_xray() 的节点 tag
+#   文案同步更新（VARIANT 内部编号含义不变，仅改 tag 显示文案）：
+#   内部变体1 → xray-tcp-REALITY-vision-dokodemo-{私钥}
+#   内部变体2 → xray-tcp-REALITY-dokodemo-{私钥}
+#   内部变体3 → xray-xhttp-REALITY-{私钥}
+#   内部变体4 → xray-xhttp-REALITY-dokodemo-{私钥}
+#   内部变体5 → xray-tcp-REALITY-vision-{私钥}
+#   内部变体6 → VLESS-xhttp-cdn（无私钥后缀，逻辑不变）
+# 配套 mod05 优化2：mod06 新增一键清空 sing-box/Xray 配置时，会一并删除本
+#   文件写出的订阅链接文件（/etc/sing-box/subscription.* 、
+#   /usr/local/etc/xray/subscription.*），本文件自身逻辑无需改动
+# ════════════════════════════════════════════════════════════════════
+#
+# ════════════════════════ 历史更新说明 ════════════════════════
 # 优化1：修复 sing-box REALITY 节点链接 address 错误地用 SNI 域名的 bug
 #   根因：generate_links_singbox Python 块中对 tls_on 节点无差别地将 addr 替换为
 #   sni 域名，REALITY 节点也被误判；现改为先提取 reality_on，再用 not reality_on
@@ -394,31 +408,35 @@ generate_links_xray() {
     local tag="" link="" params=""
     case "${VARIANT:-1}" in
         1)
-            tag="xray-reality-vision"
+            # tcp + REALITY + vision + dokodemo（新菜单第3项）[推荐]
+            tag="xray-tcp-REALITY-vision-dokodemo"
             params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
             ;;
         2)
-            tag="xray-reality"
+            # tcp + REALITY + dokodemo（新菜单第4项）
+            tag="xray-tcp-REALITY-dokodemo"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
             ;;
         3)
-            tag="xray-reality-xhttp"
+            # xhttp + REALITY（新菜单第2项）
+            tag="xray-xhttp-REALITY"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
         4)
-            tag="xray-reality-xhttp-anti"
+            # xhttp + REALITY + dokodemo（新菜单第5项）
+            tag="xray-xhttp-REALITY-dokodemo"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
         5)
-            # 原版 REALITY + 无防偷跑 + 有流控（直接监听，参考节点2）
-            # 客户端链接格式与 variant1 相同，服务端区别在于无 dokodemo-door 前置
-            tag="xray-reality-tcp-vision"
+            # tcp + REALITY + vision，无 dokodemo（新菜单第1项，直接监听，参考节点2）
+            # 客户端链接格式与内部变体1相同，服务端区别在于无 dokodemo-door 前置
+            tag="xray-tcp-REALITY-vision"
             params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
             ;;
         6)
-            # 裸 xhttp，无 REALITY/TLS，用于套CDN或本地直连（参考节点3）
+            # 裸 xhttp，无 REALITY/TLS，用于套CDN、上下行分离或本地直连（新菜单第6项，参考节点3）
             # 无私钥，tag 不附加私钥后缀
-            tag="xray-xhttp-cdn"
+            tag="VLESS-xhttp-cdn"
             params="encryption=none&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
         *)
