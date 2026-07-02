@@ -979,10 +979,10 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160)
+            SVC_CHOICES=(1 4 7 10 14 160 17)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160)
+            SVC_CHOICES=(1 4 7 10 14 160 17)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
             read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
