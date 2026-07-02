@@ -2,6 +2,13 @@
 # ── mod05_singbox_config.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
 # ════════════════════════ 本次更新说明（最新） ════════════════════════
+# 追加修复：build_xray_config() 变体1-5（所有 REALITY 系列）新增私钥/公钥/
+#   short_id 的二次交互确认环节，体验对齐 sing-box 的 build_vless_reality()：
+#   - 无论是自动生成还是从旧链接还原的密钥对/short_id，都会先展示出来，
+#     回车直接采用默认值，也可以直接粘贴自定义的 private_key（此时会追加
+#     提示输入配对的 public_key）与自定义 short_id
+#   - 此前版本这一步是全自动生成/还原，不给用户输入机会，现已修复
+#   - Variant 6（裸xhttp，无REALITY）不受影响，仍走原有独立输入逻辑
 # 优化1：xray_reality_menu() 菜单文案更名 + 重新排列（仅改展示层，
 #   内部 build_xray_config() 的变体编号(1-6)与配置生成逻辑完全不变）：
 #   旧名称                                              → 新名称
@@ -1040,11 +1047,7 @@ build_xray_config() {
             pubkey="$XRAY_PUBKEY"
         fi
 
-        if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
-            shortid="$OLD_VLESS_REALITY_SID"
-        else
-            shortid=$(openssl rand -hex 8)
-        fi
+        shortid="${OLD_VLESS_REALITY_SID:-$(openssl rand -hex 8)}"
     else
         ask_val    port "listen_port（监听端口，建议 443）" "443"
         ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
@@ -1056,6 +1059,36 @@ build_xray_config() {
         pubkey="$XRAY_PUBKEY"
 
         shortid=$(openssl rand -hex 8)
+    fi
+
+    # ── 密钥对 / short_id 二次交互确认（与 sing-box REALITY 保持一致的可自定义体验）──
+    # 上面 privkey/pubkey/shortid 只是"默认建议值"（导入旧链接还原 或 全新生成），
+    # 这里统一给一次确认/自定义机会：回车直接采用默认值，也可以直接粘贴自己的私钥/短ID
+    if [[ "$variant" != "6" ]]; then
+        echo ""
+        echo -e "  ${CYAN}◆ REALITY 密钥对（回车直接使用，如需自定义可直接粘贴）${NC}"
+        echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
+        echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
+        echo -e "    (若需自定义，请同时替换)"
+        echo ""
+        echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
+        echo -e "    (回车使用上述值)"
+        read -rp "  > " _pk_input
+        if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
+            privkey="$_pk_input"
+            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请输入对应的 public_key:${NC}"
+            read -rp "  > public_key: " pubkey
+        fi
+        echo -e "  ${GREEN}✓ private_key = ${privkey}${NC}"
+        echo -e "  ${GREEN}✓ public_key  = ${pubkey}${NC}"
+        echo ""
+
+        ask_random shortid "short_id（REALITY Short ID）" "$shortid"
+
+        echo ""
+        echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
+        echo -e "  ${BOLD}${CYAN}    ${pubkey}${NC}"
+        echo ""
     fi
 
     mkdir -p /usr/local/etc/xray /var/log/xray
