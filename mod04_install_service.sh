@@ -19,7 +19,7 @@
 #         旧 worker，再尝试拉起新 master，但新 master 因配置报错无法启动，
 #         结果 Nginx 从那一刻起彻底挂掉（sing-box Reality dest 指向本机 Nginx
 #         时，握手也因此失败，表现为"reality 节点不通"）。
-#   修复：写完 conf 后先执行 nginx -t 校验：
+#   修复：写完 conf 后先执行 nginx -t 校验，改为退出状态码判断，兼容所有语言环境：
 #         - 校验通过 → 正常 reload/restart
 #         - 校验失败 → 删除刚写入的 conf 文件，log_error 报告原因，
 #                       保留原有 Nginx 配置继续运行，脚本不再静默吞掉报错
@@ -576,13 +576,12 @@ server {
 }
 EOF
     # ── [优化2] 先校验 Nginx 配置，避免证书缺失时 restart 导致 Nginx 彻底宕机 ──
-    # 修复：使用退出码判断而非字符串匹配，避免不同 Nginx 版本/编译输出格式差异导致误判
-    local nginx_test_out
-    nginx_test_out=$(nginx -t 2>&1)
-    local nginx_test_rc=$?
-    if [[ $nginx_test_rc -eq 0 ]]; then
+    # 修复语言环境强关联问题，改为状态码判断以兼容非英文环境
+    if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续手动检查"
     else
+        local nginx_test_out
+        nginx_test_out=$(nginx -t 2>&1)
         log_error "Nginx 配置校验失败，已回滚 substore.conf，Nginx 保持原有状态继续运行！"
         log_error "校验报错如下:"
         echo "$nginx_test_out" >&2
@@ -774,13 +773,12 @@ server {
 }
 EOF
     # ── [优化2] 先校验 Nginx 配置，避免证书缺失时 restart 导致 Nginx 彻底宕机 ──
-    # 修复：使用退出码判断而非字符串匹配，避免不同 Nginx 版本/编译输出格式差异导致误判
-    local nginx_test_out
-    nginx_test_out=$(nginx -t 2>&1)
-    local nginx_test_rc=$?
-    if [[ $nginx_test_rc -eq 0 ]]; then
+    # 修复语言环境强关联问题，改为状态码判断以兼容非英文环境
+    if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续手动检查"
     else
+        local nginx_test_out
+        nginx_test_out=$(nginx -t 2>&1)
         log_error "Nginx 配置校验失败，已回滚 wallos.conf，Nginx 保持原有状态继续运行！"
         log_error "校验报错如下:"
         echo "$nginx_test_out" >&2
