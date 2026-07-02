@@ -1,10 +1,21 @@
 #!/bin/bash
 # ── mod05_singbox_config.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 历史更新说明 ════════════════════════
-#
-# ── 优化(原优化2) ──────────────────────────────────────────────
-# 新增：在"是否导入旧节点链接"之后，统一增加"代理核心选择"步骤
+# ════════════════════════ 本次更新说明 ════════════════════════
+# 优化1 (mod07)：修复 sing-box REALITY 节点生成的链接 address 错误地使用
+#   SNI 域名而非服务器 IP 的 bug（根因：Python 块中 tls_on 为 True 时把 addr
+#   替换成了 sni，对 REALITY 也生效；已改为检测 reality_on 后再决定）
+# 优化2 (mod05 + mod07)：Xray 协议菜单新增两种变体
+#   5) VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控)
+#      配置参考「节点2-VLESS+TCP+REALITY+Vision」：直接监听 0.0.0.0，无 dokodemo-door
+#   6) VLESS — xhttp (裸协议，用于套CDN或本地直连)
+#      配置参考「节点3-VLESS+XHTTP 裸协议」：无 REALITY/TLS，security=none，默认端口 6666
+#   - 链接 tag：variant5 = xray-reality-tcp-vision-{privkey}，variant6 = xray-xhttp-cdn
+#   - 导入解析：variant6 xhttp裸协议链接新增 OLD_XHTTP_CDN_* 变量捕获（uuid/port/path）
+#   - mod07 generate_links_xray 同步新增 case 5/6 链接生成
+#   - 其余 1-4 变体及全部 sing-box 协议逻辑不变
+# ════════════════════════════════════════════════════════════════════
+
 #   - 选 sing-box：完全沿用原有协议选择/生成逻辑（仅将批量选项 16/17 改为 100/101 编号，逻辑不变）
 #   - 选 Xray-core：进入新增的 4 选 1 REALITY/xhttp 协议菜单
 #       1) VLESS-REALITY 原版+防偷跑+有流控
@@ -14,32 +25,6 @@
 #     四种配置结构均参考 节点1.conf 标准模板实现，分别写入 /usr/local/etc/xray/config.json
 #   - 导入旧节点时，REALITY 链接的 uuid/port/sni/pbk/sid 仍可被沿用到 Xray 配置（复用原有解析逻辑）
 #   - 未修改任何原有 sing-box 协议 build_* 函数与生成逻辑
-#
-# ── 优化1：sing-box REALITY 节点链接 address 改为服务器 IP ────
-#   - build_vless_reality() 生成的 tag 中内嵌 PrivateKey（藏钥法）
-#   - mod07 的 generate_links_singbox() 解析 REALITY inbound 时，
-#     listen 字段为 "::" 时改用 SERVER_IP 而非 SNI 作为 addr，
-#     确保客户端连接地址为服务器真实 IP（SNI 仅用于握手伪装，
-#     不能用域名当连接地址，否则会连到第三方服务器）
-#   - 此修改已在 mod07_gen_links.sh 的 generate_links_singbox() 中体现：
-#     is_ip() 判断后 reality_on 情况下 addr 始终使用 SERVER_IP
-#
-# ── 优化2：Xray 菜单新增 选项5 和 选项6 ──────────────────────
-#   新增：
-#     5) VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控)
-#        - 无 dokodemo-door 防偷跑层，直接 0.0.0.0 监听
-#        - 带 xtls-rprx-vision 流控（参考节点2.conf 结构）
-#     6) VLESS — xhttp (裸协议，用于套CDN或本地直连)
-#        - 无 REALITY，无 TLS，纯 xhttp 裸协议
-#        - 适合套 CDN（Cloudflare 等）或本地/内网直连场景
-#        - 参考节点3.conf 扩展而来（节点3本身是tcp+reality，
-#          此处作为 xhttp 裸协议的参考结构基础）
-#   节点2.conf / 节点3.conf 结构已整合到 build_xray_config() case 5/6 分支
-#
-# ── 优化3：mod07_gen_links.sh 中 generate_links_xray() 新增 ──
-#     VARIANT 5 → xray-reality-tcp-vision（无防偷跑+有流控）链接生成
-#     VARIANT 6 → xray-xhttp-plain（xhttp 裸协议）链接生成
-#     两种新变体的订阅链接均写入 /usr/local/etc/xray/subscription.txt
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -449,7 +434,7 @@ http {
     }
 
     map $http_forwarded $proxy_add_forwarded {
-        "~^(,[ \t]*)*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*\"))?)*([ \t]*,([ \t]*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*\"))?)*)?)*$" "$http_forwarded, $proxy_forwarded_elem";
+        "~^(,[ 	]*)*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([	 \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[	 \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([	 \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[	 \x21-\x7E\x80-\xFF])*\"))?)*([ 	]*,([ 	]*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([	 \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[	 \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([	 \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[	 \x21-\x7E\x80-\xFF])*\"))?)*)?)*$" "$http_forwarded, $proxy_forwarded_elem";
         default "$proxy_forwarded_elem";
     }
 
@@ -916,8 +901,7 @@ EOF
 }
 
 # ────────────────────────────────────────────────────────────────
-#  四、配置 Xray-core — REALITY / xhttp 六种变体
-#  （变体1-4 原有，变体5=节点2结构，变体6=xhttp裸协议）
+#  四、配置 Xray-core — REALITY / xhttp 四种变体（参考 节点1.conf）
 # ────────────────────────────────────────────────────────────────
 
 xray_reality_menu() {
@@ -956,7 +940,7 @@ build_xray_config() {
         2) echo -e "${CYAN}  ─── VLESS — REALITY (原版REALITY+防偷跑 + 无流控) ───${NC}" ;;
         3) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，无防偷跑) ───${NC}" ;;
         4) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，防偷跑版) ───${NC}" ;;
-        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (原版REALITY+无防偷跑+有流控) ───${NC}" ;;
+        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控) ───${NC}" ;;
         6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN或本地直连) ───${NC}" ;;
         *) log_warn "未知选项: $variant"; return 1 ;;
     esac
@@ -968,68 +952,72 @@ build_xray_config() {
         return 1
     fi
 
-    local port uuid sn shortid privkey="" pubkey="" xpath=""
+    local port uuid sn="" shortid="" privkey="" pubkey="" xpath=""
 
-    # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
-    # OLD_VLESS_REALITY_* 作为默认值；选择「2) 否，生成全新配置」时
-    # （包括 import_choice 为空/默认的情况）一律不检测、不读取任何外部链接，纯新生成。
-    if [[ "${import_choice:-2}" == "1" ]]; then
+    # ── Variant 6：裸 xhttp（CDN/直连），无 REALITY，独立输入逻辑 ──
+    if [[ "$variant" == "6" ]]; then
+        if [[ "${import_choice:-2}" == "1" ]]; then
+            ask_val    port "监听端口（用于CDN回源，建议避开443）" "${OLD_XHTTP_CDN_PORT:-6666}"
+            ask_random uuid "uuid（用户 UUID）" "${OLD_XHTTP_CDN_UUID:-$(gen_uuid)}"
+            ask_val    xpath "xhttp path（路径）" "${OLD_XHTTP_CDN_PATH:-/$(openssl rand -hex 6)}"
+        else
+            ask_val    port "监听端口（用于CDN回源，建议避开443）" "6666"
+            ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+            ask_val    xpath "xhttp path（路径，留空自动生成随机路径）" "/$(openssl rand -hex 6)"
+        fi
+    # ── Variants 1-5：REALITY 系列，统一输入逻辑 ──
+    elif [[ "${import_choice:-2}" == "1" ]]; then
+        # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
+        # OLD_VLESS_REALITY_* 作为默认值；选择「2) 否，生成全新配置」时纯新生成。
         ask_val    port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
         ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
+        ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
 
-        # 变体6(xhttp裸协议)不需要SNI/REALITY相关参数
-        if [[ "$variant" != "6" ]]; then
-            ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
-
-            if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
-                privkey="$OLD_VLESS_REALITY_PK"
+        if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
+            privkey="$OLD_VLESS_REALITY_PK"
+            pubkey="$OLD_VLESS_REALITY_PBK"
+            echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
+        elif [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
+            echo -e "  ${YELLOW}⚠ 检测到您导入的 REALITY 节点链接中只含 PublicKey（公钥），${NC}"
+            echo -e "  ${YELLOW}REALITY 服务端必须使用与之配对的 PrivateKey（私钥）才能让原节点继续可用。${NC}"
+            read -rp "  > 请粘贴原 PrivateKey (若留空，则生成新密钥对，原节点将失效): " privkey
+            if [[ -n "$privkey" && ${#privkey} -eq 43 ]]; then
                 pubkey="$OLD_VLESS_REALITY_PBK"
-                echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
-            elif [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
-                echo -e "  ${YELLOW}⚠ 检测到您导入的 REALITY 节点链接中只含 PublicKey（公钥），${NC}"
-                echo -e "  ${YELLOW}REALITY 服务端必须使用与之配对的 PrivateKey（私钥）才能让原节点继续可用。${NC}"
-                read -rp "  > 请粘贴原 PrivateKey (若留空，则生成新密钥对，原节点将失效): " privkey
-                if [[ -n "$privkey" && ${#privkey} -eq 43 ]]; then
-                    pubkey="$OLD_VLESS_REALITY_PBK"
-                else
-                    log_info "未提供有效私钥，正在通过 Xray 生成全新 REALITY 密钥对..."
-                    gen_xray_reality_keypair
-                    privkey="$XRAY_PRIVKEY"
-                    pubkey="$XRAY_PUBKEY"
-                fi
             else
-                log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
+                log_info "未提供有效私钥，正在通过 Xray 生成全新 REALITY 密钥对..."
                 gen_xray_reality_keypair
                 privkey="$XRAY_PRIVKEY"
                 pubkey="$XRAY_PUBKEY"
             fi
-
-            if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
-                shortid="$OLD_VLESS_REALITY_SID"
-            else
-                shortid=$(openssl rand -hex 8)
-            fi
-        fi
-    else
-        ask_val    port "listen_port（监听端口，建议 443）" "443"
-        ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
-
-        if [[ "$variant" != "6" ]]; then
-            ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
+        else
             log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
             gen_xray_reality_keypair
             privkey="$XRAY_PRIVKEY"
             pubkey="$XRAY_PUBKEY"
+        fi
+
+        if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
+            shortid="$OLD_VLESS_REALITY_SID"
+        else
             shortid=$(openssl rand -hex 8)
         fi
+    else
+        ask_val    port "listen_port（监听端口，建议 443）" "443"
+        ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+        ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
+
+        log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
+        gen_xray_reality_keypair
+        privkey="$XRAY_PRIVKEY"
+        pubkey="$XRAY_PUBKEY"
+
+        shortid=$(openssl rand -hex 8)
     fi
 
     mkdir -p /usr/local/etc/xray /var/log/xray
 
     case "$variant" in
         1|2)
-            # 防偷跑版：dokodemo-door 在公网端口监听，sniff TLS 流量，
-            # 非目标 SNI 的连接路由到 block（防止扫描探测）
             local flow_line=""
             [[ "$variant" == "1" ]] && flow_line='"flow": "xtls-rprx-vision",'
             cat > /usr/local/etc/xray/config.json << EOF
@@ -1220,8 +1208,8 @@ EOF
 EOF
             ;;
         5)
-            # 原版REALITY + 无防偷跑（直接 0.0.0.0 监听）+ 有流控（xtls-rprx-vision）
-            # 参考节点2.conf 结构：listen=0.0.0.0，无 dokodemo-door，带 sniffing
+            # 原版 REALITY + 无防偷跑 + 有流控：直接监听 0.0.0.0，无 dokodemo-door，
+            # 参考节点2-VLESS+TCP+REALITY+Vision
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1237,8 +1225,7 @@ EOF
                 "clients": [
                     {
                         "id": "$uuid",
-                        "flow": "xtls-rprx-vision",
-                        "email": "vless-reality-tcp"
+                        "flow": "xtls-rprx-vision"
                     }
                 ],
                 "decryption": "none"
@@ -1250,13 +1237,9 @@ EOF
                     "show": false,
                     "dest": "$sn:443",
                     "xver": 0,
-                    "serverNames": [
-                        "$sn"
-                    ],
+                    "serverNames": ["$sn"],
                     "privateKey": "$privkey",
-                    "shortIds": [
-                        "$shortid"
-                    ]
+                    "shortIds": ["$shortid"]
                 }
             },
             "sniffing": {
@@ -1273,13 +1256,8 @@ EOF
 EOF
             ;;
         6)
-            # xhttp 裸协议（无 REALITY，无 TLS）
-            # 用于套 CDN（如 Cloudflare）或本地/内网直连，CDN 负责 TLS 终结
-            # 参考节点3.conf 扩展（节点3 是 tcp+reality，此处改为 xhttp 裸协议）
-            local xpath_default="/$(openssl rand -hex 6)"
-            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-$xpath_default}"
-            local xhttp_port_default="80"
-            ask_val port "listen_port（监听端口，套CDN建议80，直连可自定义）" "${port:-$xhttp_port_default}"
+            # 裸 xhttp，无 REALITY / TLS，用于套CDN或本地直连
+            # 参考节点3-VLESS+XHTTP 裸协议
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1287,16 +1265,14 @@ EOF
     },
     "inbounds": [
         {
-            "tag": "xhttp-plain-in",
+            "tag": "xhttp-cdn-in",
             "listen": "0.0.0.0",
             "port": $port,
             "protocol": "vless",
             "settings": {
                 "clients": [
                     {
-                        "id": "$uuid",
-                        "flow": "",
-                        "email": "xhttp-plain"
+                        "id": "$uuid"
                     }
                 ],
                 "decryption": "none"
@@ -1316,14 +1292,9 @@ EOF
         }
     ],
     "outbounds": [
-        {"tag": "direct", "protocol": "freedom"},
-        {"tag": "block", "protocol": "blackhole"}
-    ],
-    "routing": {
-        "rules": [
-            {"type": "field", "inboundTag": ["xhttp-plain-in"], "outboundTag": "direct"}
-        ]
-    }
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"}
+    ]
 }
 EOF
             ;;
@@ -1336,10 +1307,10 @@ EOF
     {
         echo "PORT=$port"
         echo "UUID=$uuid"
-        echo "SNI=${sn:-}"
-        echo "PUBLIC_KEY=${pubkey:-}"
-        echo "PRIVATE_KEY=${privkey:-}"
-        echo "SHORT_ID=${shortid:-}"
+        echo "SNI=$sn"
+        echo "PUBLIC_KEY=$pubkey"
+        echo "PRIVATE_KEY=$privkey"
+        echo "SHORT_ID=$shortid"
         echo "VARIANT=$variant"
         [[ -n "$xpath" ]] && echo "XHTTP_PATH=$xpath"
     } > /etc/xray/node_meta.conf
@@ -1547,6 +1518,11 @@ for line in input_text.splitlines():
                     if port: vars_out["OLD_VLESS_WS_PORT"] = clean_val(port)
                     if sni: vars_out["OLD_VLESS_WS_SNI"] = clean_val(sni)
                     if "path" in qs: vars_out["OLD_VLESS_WS_PATH"] = clean_val(qs["path"][0])
+                elif type_ == "xhttp" and security not in ("reality",):
+                    # Xray variant 6：裸 xhttp（CDN/直连），无 REALITY，无 TLS
+                    vars_out["OLD_XHTTP_CDN_UUID"] = clean_val(uuid)
+                    if port: vars_out["OLD_XHTTP_CDN_PORT"] = clean_val(port)
+                    if "path" in qs: vars_out["OLD_XHTTP_CDN_PATH"] = clean_val(qs["path"][0])
                 else:
                     vars_out["OLD_VLESS_TCP_UUID"] = clean_val(uuid)
                     if port: vars_out["OLD_VLESS_TCP_PORT"] = clean_val(port)
