@@ -1,7 +1,22 @@
 #!/bin/bash
 # ── mod06_service_mgmt.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 (配套优化1/2) ════════════════════════
+# ════════════════════════ 本次更新说明（最新，优化2） ════════════════════════
+# 新增一键分别清空 sing-box / Xray-core 配置功能：
+#   - clear_singbox_config()：停止 sing-box 服务（释放对应端口）→
+#     删除 /etc/sing-box/config.json → 顺便清空该内核订阅链接文件
+#     (/etc/sing-box/subscription.txt、subscription.b64、clash.yaml)
+#     入口：「五、服务管理」→「1 管理 sing-box」→ 新增第 12 项
+#   - clear_xray_config()：停止 xray 服务（释放对应端口）→
+#     删除 /usr/local/etc/xray/config.json 及节点元数据 node_meta.conf →
+#     顺便清空该内核订阅链接文件 (/usr/local/etc/xray/subscription.txt、
+#     subscription.b64)
+#     入口：「五、服务管理」→「7 管理 Xray-core」→ 新增第 11 项
+#   - 均带二次确认提示，操作前需输入 y 才会执行，避免误触清空
+#   - 不影响原有 1-11 (sing-box) / 1-10 (Xray) 各功能编号与逻辑
+# ════════════════════════════════════════════════════════════════════
+#
+# ════════════════════════ 历史更新说明 (配套优化1/2) ════════════════════════
 # 新增：管理 Xray-core 服务的子菜单 menu_manage_xray()，与 menu_manage_singbox()
 #   保持同样的交互风格（启动/停止/重启/状态/开机自启/日志/验证配置/卸载）
 #   - 验证配置使用 `xray run -test -config`
@@ -72,6 +87,7 @@ menu_manage_singbox() {
         echo "  9) 验证配置文件"
         echo " 10) 一键修复配置（移除旧 dns/route 段）"
         echo " 11) 卸载 sing-box"
+        echo " 12) 一键清空 sing-box 配置（释放端口 + 清空订阅链接）"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -147,10 +163,31 @@ menu_manage_singbox() {
                 press_enter ;;
             10) fix_dns_format; press_enter ;;
             11) uninstall_singbox; press_enter ;;
+            12) clear_singbox_config ;;
             0) return ;;
             *) log_warn "无效选项"; sleep 1 ;;
         esac
     done
+}
+
+# 一键清空 sing-box 配置：停止服务释放端口，删除配置文件与该内核订阅链接
+clear_singbox_config() {
+    echo ""
+    echo -e "${YELLOW}警告：此操作将停止 sing-box 服务、删除 /etc/sing-box/config.json${NC}"
+    echo -e "${YELLOW}并清空其订阅链接文件 (subscription.txt/.b64、clash.yaml)，对应端口将随之释放！${NC}"
+    read -rp "确认清空 sing-box 配置？(y/N): " _confirm
+    if [[ "${_confirm,,}" != "y" ]]; then
+        log_info "已取消操作"
+        press_enter
+        return
+    fi
+
+    systemctl stop sing-box >/dev/null 2>&1 || true
+    rm -f /etc/sing-box/config.json
+    rm -f /etc/sing-box/subscription.txt /etc/sing-box/subscription.b64 /etc/sing-box/clash.yaml
+
+    log_success "sing-box 配置文件及订阅链接已清空，服务已停止（端口已释放）"
+    press_enter
 }
 
 menu_manage_xray() {
@@ -185,6 +222,7 @@ menu_manage_xray() {
         echo "  8) 实时查看日志"
         echo "  9) 验证配置文件"
         echo " 10) 卸载 Xray-core"
+        echo " 11) 一键清空 Xray-core 配置（释放端口 + 清空订阅链接）"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -256,10 +294,33 @@ menu_manage_xray() {
                 fi
                 press_enter ;;
             10) uninstall_xray; press_enter ;;
+            11) clear_xray_config ;;
             0) return ;;
             *) log_warn "无效选项"; sleep 1 ;;
         esac
     done
+}
+
+# 一键清空 Xray-core 配置：停止服务释放端口，删除配置文件、节点元数据与该内核订阅链接
+clear_xray_config() {
+    echo ""
+    echo -e "${YELLOW}警告：此操作将停止 Xray-core 服务、删除 /usr/local/etc/xray/config.json${NC}"
+    echo -e "${YELLOW}及节点元数据 /etc/xray/node_meta.conf，并清空其订阅链接文件${NC}"
+    echo -e "${YELLOW}(subscription.txt/.b64)，对应端口将随之释放！${NC}"
+    read -rp "确认清空 Xray-core 配置？(y/N): " _confirm
+    if [[ "${_confirm,,}" != "y" ]]; then
+        log_info "已取消操作"
+        press_enter
+        return
+    fi
+
+    systemctl stop xray >/dev/null 2>&1 || true
+    rm -f /usr/local/etc/xray/config.json
+    rm -f /etc/xray/node_meta.conf
+    rm -f /usr/local/etc/xray/subscription.txt /usr/local/etc/xray/subscription.b64
+
+    log_success "Xray-core 配置文件、节点元数据及订阅链接已清空，服务已停止（端口已释放）"
+    press_enter
 }
 
 menu_manage_nginx() {
