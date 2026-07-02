@@ -1,61 +1,10 @@
 #!/bin/bash
 # ── mod05_singbox_config.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明（最新） ════════════════════════
-# 追加修复：build_xray_config() 变体1-5（所有 REALITY 系列）新增私钥/公钥/
-#   short_id 的二次交互确认环节，体验对齐 sing-box 的 build_vless_reality()：
-#   - 无论是自动生成还是从旧链接还原的密钥对/short_id，都会先展示出来，
-#     回车直接采用默认值，也可以直接粘贴自定义的 private_key（此时会追加
-#     提示输入配对的 public_key）与自定义 short_id
-#   - 此前版本这一步是全自动生成/还原，不给用户输入机会，现已修复
-#   - Variant 6（裸xhttp，无REALITY）不受影响，仍走原有独立输入逻辑
-# 优化1：xray_reality_menu() 菜单文案更名 + 重新排列（仅改展示层，
-#   内部 build_xray_config() 的变体编号(1-6)与配置生成逻辑完全不变）：
-#   旧名称                                              → 新名称
-#   ① VLESS—REALITY(原版REALITY+防偷跑+有流控)[推荐]     → VLESS—REALITY—tcp (tcp+REALITY+vision+dokodemo) [推荐]
-#   ② VLESS—REALITY(原版REALITY+防偷跑+无流控)           → VLESS—REALITY—tcp (tcp+REALITY+dokodemo)
-#   ③ VLESS—xhttp(xhttp+REALITY，防偷跑版)               → VLESS—REALITY—xhttp (xhttp+REALITY+dokodemo)
-#   ④ VLESS—xhttp(xhttp+REALITY，无防偷跑)               → VLESS—REALITY—xhttp (xhttp+REALITY)
-#   ⑤ VLESS—REALITY—tcp(原版REALITY+无防偷跑+有流控)     → VLESS—REALITY—tcp (tcp+REALITY+vision)
-#   ⑥ VLESS—xhttp(裸协议，用于套CDN或本地直连)           → VLESS—xhttp (裸协议，用于套CDN、上下行分离、本地直连)
-#   新菜单展示顺序：1=旧⑤ 2=旧④ 3=旧① 4=旧② 5=旧③ 6=旧⑥
-#   （xray_reality_menu() 内新增"新→内部旧"编号映射表，选择后再转交
-#     build_xray_config() 用旧编号执行，JSON 结构/节点tag来源完全不受影响）
-#   配套 mod07_gen_links.sh 同步更新 generate_links_xray() 的 tag 文案：
-#     内部变体1→xray-tcp-REALITY-vision-dokodemo-{私钥}
-#     内部变体2→xray-tcp-REALITY-dokodemo-{私钥}
-#     内部变体3→xray-xhttp-REALITY-{私钥}
-#     内部变体4→xray-xhttp-REALITY-dokodemo-{私钥}
-#     内部变体5→xray-tcp-REALITY-vision-{私钥}
-#     内部变体6→VLESS-xhttp-cdn（无私钥后缀）
-# 优化2：mod06_service_mgmt.sh 新增"一键清空 sing-box / Xray 配置"功能
-#   （分别位于 管理sing-box / 管理Xray-core 子菜单内，停止服务释放端口，
-#     删除 config.json 及对应内核订阅链接文件，详见 mod06 顶部注释）
-# ════════════════════════════════════════════════════════════════════
-#
-# ════════════════════════ 历史更新说明 ════════════════════════
+# ════════════════════════ 本次更新说明 ════════════════════════
 # 优化1 (mod07)：修复 sing-box REALITY 节点生成的链接 address 错误地使用
 #   SNI 域名而非服务器 IP 的 bug（根因：Python 块中 tls_on 为 True 时把 addr
 #   替换成了 sni，对 REALITY 也生效；已改为检测 reality_on 后再决定）
-# ════════════════════════════════════════════════════════════════════
-#
-# ════════════════ 修复：REALITY 系列导入旧节点 short_id 失效 ════════════════
-# 现象：VLESS-REALITY-xhttp（及理论上所有 REALITY 系列）新建节点能通，
-#   但导入旧节点链接后不通，具体表现为 short_id 与旧链接对不上。
-# 根因：Python urllib.parse.parse_qs() 默认 keep_blank_values=False，
-#   会把值为空的 query 参数（如很多面板默认导出的 &sid=）直接丢弃，
-#   导致 OLD_VLESS_REALITY_SID 未被赋值 -> bash 的 ${VAR:-default} 误判为
-#   "没导入到"，从而随机生成一个新 short_id，和客户端原有配置的空 short_id
-#   对不上，REALITY 握手失败。
-# 修复内容：
-#   1) parse_qs() 增加 keep_blank_values=True，正确保留空值参数
-#   2) sing-box build_vless_reality() 与 Xray build_xray_config() 中，
-#      改用 ${VAR+_} 判断"是否被赋值过"，而不是用 ${VAR:-default}
-#      （后者无法区分"未设置"与"设置为空字符串"）
-#   3) build_xray_config() variant 3/4/5（xhttp 系列 + tcp-vision-only）的
-#      shortIds 数组统一补上 "" 空值兜底，与 variant 1/2 保持一致，
-#      即使以后再出现类似解析遗漏也有一层保护
-# ════════════════════════════════════════════════════════════════════
 # 优化2 (mod05 + mod07)：Xray 协议菜单新增两种变体
 #   5) VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控)
 #      配置参考「节点2-VLESS+TCP+REALITY+Vision」：直接监听 0.0.0.0，无 dokodemo-door
@@ -307,17 +256,6 @@ build_vless_reality() {
     sid_rand=$(gen_short_id)
     echo ""
 
-    # 修复：旧节点原本 short_id 为空（很多面板默认就是空 short_id）时，
-    # bash 的 ${VAR:-default} 无法区分"变量未设置"和"变量被设置为空字符串"，
-    # 会误把空 short_id 当成"没导入到"，从而随机生成一个新的、导致连不上。
-    # 用 ${VAR+_} 只判断"是否被赋值过"，哪怕值是空字符串也会被正确保留。
-    local si_default
-    if [[ -n "${OLD_VLESS_REALITY_SID+_}" ]]; then
-        si_default="$OLD_VLESS_REALITY_SID"
-    else
-        si_default="$sid_rand"
-    fi
-
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
         pk="$privkey"
         echo -e "  ${GREEN}✓ [自动] private_key = ${pk}${NC}"
@@ -341,7 +279,7 @@ build_vless_reality() {
     fi
     echo ""
 
-    ask_random si "short_id（REALITY Short ID）" "$si_default"
+    ask_random si "short_id（REALITY Short ID）" "${OLD_VLESS_REALITY_SID:-$sid_rand}"
 
     echo ""
     echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
@@ -970,12 +908,12 @@ xray_reality_menu() {
     echo ""
     echo -e "${BOLD}${CYAN}请选择要配置的 Xray 协议 (Xray 目前在此面板支持单选):${NC}"
     echo ""
-    echo "   1)  VLESS — REALITY — tcp (tcp + REALITY + vision)"
-    echo "   2)  VLESS — REALITY — xhttp (xhttp + REALITY)"
-    echo "   3)  VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐]"
-    echo "   4)  VLESS — REALITY — tcp (tcp + REALITY + dokodemo)"
-    echo "   5)  VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo)"
-    echo "   6)  VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连)"
+    echo "   1)  VLESS — REALITY (原版REALITY+防偷跑 + 有流控) [推荐]"
+    echo "   2)  VLESS — REALITY (原版REALITY+防偷跑 + 无流控)"
+    echo "   3)  VLESS — xhttp (xhttp+REALITY，无防偷跑)"
+    echo "   4)  VLESS — xhttp (xhttp+REALITY，防偷跑版)"
+    echo "   5)  VLESS — REALITY — tcp (原版REALITY+ 无防偷跑 + 有流控)"
+    echo "   6)  VLESS — xhttp (裸协议，用于套CDN或本地直连)"
     echo ""
     echo "   0)  返回主菜单"
     echo ""
@@ -983,26 +921,7 @@ xray_reality_menu() {
     xr_choice=${xr_choice:-0}
     [[ "$xr_choice" == "0" ]] && return 1
 
-    # 新菜单编号 → build_xray_config() 内部旧变体编号映射表
-    # （仅用于把新排列顺序转换回原有配置生成逻辑，JSON结构/写入路径/节点tag来源均不受影响）
-    #   新1(tcp+vision)              -> 内部5
-    #   新2(xhttp+REALITY)           -> 内部3
-    #   新3(tcp+vision+dokodemo)[推荐] -> 内部1
-    #   新4(tcp+dokodemo)            -> 内部2
-    #   新5(xhttp+dokodemo)          -> 内部4
-    #   新6(裸xhttp)                 -> 内部6
-    local internal_variant
-    case "$xr_choice" in
-        1) internal_variant=5 ;;
-        2) internal_variant=3 ;;
-        3) internal_variant=1 ;;
-        4) internal_variant=2 ;;
-        5) internal_variant=4 ;;
-        6) internal_variant=6 ;;
-        *) log_warn "无效选项: $xr_choice"; press_enter; return 1 ;;
-    esac
-
-    build_xray_config "$internal_variant"
+    build_xray_config "$xr_choice"
 }
 
 # 通过 Xray 自身生成 REALITY x25519 密钥对，兼容不同版本的输出文案
@@ -1017,12 +936,12 @@ build_xray_config() {
     local variant="$1"
     echo ""
     case "$variant" in
-        1) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐] ───${NC}" ;;
-        2) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + dokodemo) ───${NC}" ;;
-        3) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY) ───${NC}" ;;
-        4) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo) ───${NC}" ;;
-        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision) ───${NC}" ;;
-        6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连) ───${NC}" ;;
+        1) echo -e "${CYAN}  ─── VLESS — REALITY (原版REALITY+防偷跑 + 有流控) ───${NC}" ;;
+        2) echo -e "${CYAN}  ─── VLESS — REALITY (原版REALITY+防偷跑 + 无流控) ───${NC}" ;;
+        3) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，无防偷跑) ───${NC}" ;;
+        4) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，防偷跑版) ───${NC}" ;;
+        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控) ───${NC}" ;;
+        6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN或本地直连) ───${NC}" ;;
         *) log_warn "未知选项: $variant"; return 1 ;;
     esac
     echo ""
@@ -1077,13 +996,10 @@ build_xray_config() {
             pubkey="$XRAY_PUBKEY"
         fi
 
-        # 修复：原理同 sing-box 分支 —— ${VAR:-default} 无法区分"未导入到 sid"
-        # 和"导入到的 sid 本来就是空字符串"，会把很多面板默认的空 short_id
-        # 误换成随机新值，导致 REALITY 握手 short_id 对不上、连不通。
-        if [[ -n "${OLD_VLESS_REALITY_SID+_}" ]]; then
+        if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
             shortid="$OLD_VLESS_REALITY_SID"
         else
-            shortid="$(openssl rand -hex 8)"
+            shortid=$(openssl rand -hex 8)
         fi
     else
         ask_val    port "listen_port（监听端口，建议 443）" "443"
@@ -1096,36 +1012,6 @@ build_xray_config() {
         pubkey="$XRAY_PUBKEY"
 
         shortid=$(openssl rand -hex 8)
-    fi
-
-    # ── 密钥对 / short_id 二次交互确认（与 sing-box REALITY 保持一致的可自定义体验）──
-    # 上面 privkey/pubkey/shortid 只是"默认建议值"（导入旧链接还原 或 全新生成），
-    # 这里统一给一次确认/自定义机会：回车直接采用默认值，也可以直接粘贴自己的私钥/短ID
-    if [[ "$variant" != "6" ]]; then
-        echo ""
-        echo -e "  ${CYAN}◆ REALITY 密钥对（回车直接使用，如需自定义可直接粘贴）${NC}"
-        echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
-        echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
-        echo -e "    (若需自定义，请同时替换)"
-        echo ""
-        echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
-        echo -e "    (回车使用上述值)"
-        read -rp "  > " _pk_input
-        if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
-            privkey="$_pk_input"
-            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请输入对应的 public_key:${NC}"
-            read -rp "  > public_key: " pubkey
-        fi
-        echo -e "  ${GREEN}✓ private_key = ${privkey}${NC}"
-        echo -e "  ${GREEN}✓ public_key  = ${pubkey}${NC}"
-        echo ""
-
-        ask_random shortid "short_id（REALITY Short ID）" "$shortid"
-
-        echo ""
-        echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
-        echo -e "  ${BOLD}${CYAN}    ${pubkey}${NC}"
-        echo ""
     fi
 
     mkdir -p /usr/local/etc/xray /var/log/xray
@@ -1231,7 +1117,7 @@ EOF
                     "dest": "$sn:443",
                     "serverNames": ["$sn"],
                     "privateKey": "$privkey",
-                    "shortIds": ["", "$shortid"]
+                    "shortIds": ["$shortid"]
                 },
                 "xhttpSettings": {
                     "path": "$xpath",
@@ -1298,7 +1184,7 @@ EOF
                     "dest": "$sn:443",
                     "serverNames": ["$sn"],
                     "privateKey": "$privkey",
-                    "shortIds": ["", "$shortid"]
+                    "shortIds": ["$shortid"]
                 },
                 "xhttpSettings": {
                     "path": "$xpath",
@@ -1353,7 +1239,7 @@ EOF
                     "xver": 0,
                     "serverNames": ["$sn"],
                     "privateKey": "$privkey",
-                    "shortIds": ["", "$shortid"]
+                    "shortIds": ["$shortid"]
                 }
             },
             "sniffing": {
@@ -1563,12 +1449,7 @@ for line in input_text.splitlines():
             qs = {}
             query_idx = rest.find("?")
             if query_idx != -1:
-                # keep_blank_values=True：不能省略！很多面板导出的 REALITY 节点
-                # short_id 是空值（如 &sid= ），Python 的 parse_qs 默认会把"值为空"
-                # 的参数直接丢弃，导致这里读不到 sid=""，下面会误判成"没有导入到
-                # short_id"从而随机生成新的，造成新旧节点 short_id 对不上、
-                # REALITY 握手失败（这是本次修复的根因）。
-                qs = urllib.parse.parse_qs(rest[query_idx+1:], keep_blank_values=True)
+                qs = urllib.parse.parse_qs(rest[query_idx+1:])
                 rest = rest[:query_idx]
                 
             at_idx = rest.rfind("@")
