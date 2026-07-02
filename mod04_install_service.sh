@@ -329,6 +329,62 @@ EOF
     fi
 }
 
+# ---------------------------------------------------------------------------
+# 端口占用检测与自动避让（修复 sing-box 等服务与 Nginx 反代 8080 端口冲突问题）
+# 原因：Sub-Store / Wallos 的 Nginx 反代配置中，HTTP→HTTPS 跳转端口写死为 8080。
+# 若该端口已被 sing-box 等其他服务占用，Nginx reload/restart 时 bind() 会失败，
+# 而 Nginx 对 bind() 失败是整体拒绝启动的（不是仅这一个 server 块失效），因此会
+# 连带导致 Sub-Store、Wallos 等所有反代面板同时无法访问。
+# 这里在生成 Nginx 配置前先探测 8080 是否空闲：空闲则行为与原来完全一致，仍使用
+# 8080；被占用则自动切换到备用端口，不影响任何已有功能。
+# ---------------------------------------------------------------------------
+_is_port_free() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ! ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .
+    elif command -v netstat >/dev/null 2>&1; then
+        ! netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[.:]${port}\$"
+    else
+        ! (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null
+    fi
+}
+
+_get_free_http_redirect_port() {
+    local preferred="${1:-8080}"
+
+    if _is_port_free "$preferred"; then
+        echo "$preferred"
+        return 0
+    fi
+
+    log_warn "检测到 ${preferred} 端口已被占用（很可能是 sing-box 等服务），若继续沿用该端口，Nginx 会因 bind() 失败而整体拒绝启动，导致本面板及其他已部署面板同时无法访问。"
+
+    local candidate
+    for candidate in 8081 8082 8090 8070 18080 28080; do
+        if _is_port_free "$candidate"; then
+            log_warn "已自动改用备用 HTTP 跳转端口: ${candidate}（不影响通过 https://域名:8443 直接访问面板）"
+            # 尽力放行该备用端口，即便对应防火墙工具不存在或命令失败也不影响主流程
+            if command -v ufw >/dev/null 2>&1; then
+                ufw allow "${candidate}/tcp" >/dev/null 2>&1 || true
+            fi
+            if command -v firewall-cmd >/dev/null 2>&1; then
+                firewall-cmd --permanent --add-port="${candidate}/tcp" >/dev/null 2>&1 || true
+                firewall-cmd --reload >/dev/null 2>&1 || true
+            fi
+            if command -v iptables >/dev/null 2>&1; then
+                iptables -C INPUT -p tcp --dport "${candidate}" -j ACCEPT >/dev/null 2>&1 || \
+                    iptables -I INPUT -p tcp --dport "${candidate}" -j ACCEPT >/dev/null 2>&1 || true
+            fi
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    log_warn "未找到可用的备用 HTTP 跳转端口，将跳过 80→443 自动跳转配置（不影响通过 https://域名:8443 直接访问面板）"
+    echo ""
+    return 1
+}
+
 install_substore() {
     local sub_ver_choice="${1:-1}"
     
@@ -525,15 +581,26 @@ EOF
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
-    
+
+    # 修复端口冲突：HTTP 跳转端口不再写死为 8080，先探测是否已被 sing-box 等服务占用，
+    # 占用则自动切换备用端口，避免 Nginx 因 bind() 失败而整体拒绝启动
+    local http_redirect_port
+    http_redirect_port=$(_get_free_http_redirect_port 8080)
+    echo "$http_redirect_port" > /root/docker/substore/redirect_port.txt 2>/dev/null || true
+
+    local redirect_block=""
+    if [[ -n "$http_redirect_port" ]]; then
+        redirect_block="server {
+    listen ${http_redirect_port};
+    listen [::]:${http_redirect_port};
+    server_name ${sn};
+    return 301 https://\$host:8443\$request_uri;
+}"
+    fi
+
     # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/substore.conf <<EOF
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name $sn;
-    return 301 https://\$host:8443\$request_uri;
-}
+${redirect_block}
 server {
     listen 8443 ssl;
     listen [::]:8443 ssl;
@@ -713,15 +780,26 @@ EOF
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
-    
+
+    # 修复端口冲突：HTTP 跳转端口不再写死为 8080，先探测是否已被 sing-box 等服务占用，
+    # 占用则自动切换备用端口，避免 Nginx 因 bind() 失败而整体拒绝启动
+    local http_redirect_port
+    http_redirect_port=$(_get_free_http_redirect_port 8080)
+    echo "$http_redirect_port" > /root/docker/wallos/redirect_port.txt 2>/dev/null || true
+
+    local redirect_block=""
+    if [[ -n "$http_redirect_port" ]]; then
+        redirect_block="server {
+    listen ${http_redirect_port};
+    listen [::]:${http_redirect_port};
+    server_name ${sn};
+    return 301 https://\$host:8443\$request_uri;
+}"
+    fi
+
     # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name $sn;
-    return 301 https://\$host:8443\$request_uri;
-}
+${redirect_block}
 server {
     listen 8443 ssl;
     listen [::]:8443 ssl;
