@@ -9,6 +9,27 @@
 #   - 新增菜单项 17/18/19，插入在 Realm 之后、批量执行之前
 #   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm 卸载与安装逻辑均保持不变）
 # ════════════════════════════════════════════════════════════════════
+#
+# ════════════════════════ 本次更新说明 (优化2 & 优化3) ════════════════════════
+#
+# [优化2] 修复：Sub-Store / Wallos 安装后 Nginx 彻底宕机问题
+#   根因：install_substore() / install_wallos() 写入 nginx conf 后，直接执行
+#         systemctl reload/restart nginx，未事先校验配置合法性。
+#         当证书文件不存在时，nginx -t 校验失败，restart 会先发 SIGQUIT 停掉
+#         旧 worker，再尝试拉起新 master，但新 master 因配置报错无法启动，
+#         结果 Nginx 从那一刻起彻底挂掉（sing-box Reality dest 指向本机 Nginx
+#         时，握手也因此失败，表现为"reality 节点不通"）。
+#   修复：写完 conf 后先执行 nginx -t 校验：
+#         - 校验通过 → 正常 reload/restart
+#         - 校验失败 → 删除刚写入的 conf 文件，log_error 报告原因，
+#                       保留原有 Nginx 配置继续运行，脚本不再静默吞掉报错
+#
+# [优化3] 修复：选择 "100) 全部自动执行 (所有服务)" 时未安装 Xray
+#   根因：SVC_CHOICES=(1 4 7 10 14 160) 列表中遗漏了菜单项 17（Xray 最新稳定版）
+#   修复：将列表补全为 SVC_CHOICES=(1 4 7 10 14 160 17)
+#         101（全部手动执行）同步补全，保持一致
+#
+# ════════════════════════════════════════════════════════════════════
 
 
 # ────────────────────────────────────────────────────────────────
@@ -554,8 +575,19 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
-    
+    # ── [优化2] 先校验 Nginx 配置，避免证书缺失时 restart 导致 Nginx 彻底宕机 ──
+    local nginx_test_out
+    nginx_test_out=$(nginx -t 2>&1)
+    if echo "$nginx_test_out" | grep -q "test is successful"; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续手动检查"
+    else
+        log_error "Nginx 配置校验失败，已回滚 substore.conf，Nginx 保持原有状态继续运行！"
+        log_error "校验报错如下:"
+        echo "$nginx_test_out" >&2
+        log_warn "请确认证书文件已存在后，手动执行: nginx -t && systemctl reload nginx"
+        rm -f /etc/nginx/conf.d/substore.conf
+    fi
+
     echo ""
     log_success "Sub-Store 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api_path${NC}"
@@ -739,8 +771,19 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
-    
+    # ── [优化2] 先校验 Nginx 配置，避免证书缺失时 restart 导致 Nginx 彻底宕机 ──
+    local nginx_test_out
+    nginx_test_out=$(nginx -t 2>&1)
+    if echo "$nginx_test_out" | grep -q "test is successful"; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续手动检查"
+    else
+        log_error "Nginx 配置校验失败，已回滚 wallos.conf，Nginx 保持原有状态继续运行！"
+        log_error "校验报错如下:"
+        echo "$nginx_test_out" >&2
+        log_warn "请确认证书文件已存在后，手动执行: nginx -t && systemctl reload nginx"
+        rm -f /etc/nginx/conf.d/wallos.conf
+    fi
+
     echo ""
     log_success "Wallos 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443${NC}"
@@ -979,10 +1022,10 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160)
+            SVC_CHOICES=(1 4 7 10 14 160 17)   # [优化3] 补全 Xray 最新稳定版(17)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160)
+            SVC_CHOICES=(1 4 7 10 14 160 17)   # [优化3] 补全 Xray 最新稳定版(17)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
             read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
