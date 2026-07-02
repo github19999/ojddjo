@@ -9,7 +9,7 @@
 #   5) VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控)
 #      配置参考「节点2-VLESS+TCP+REALITY+Vision」：直接监听 0.0.0.0，无 dokodemo-door
 #   6) VLESS — xhttp (裸协议，用于套CDN或本地直连)
-#      配置参考「节点3-VLESS+XHTTP 裸协议」：无 REALITY/TLS，security=none，默认端口 6666
+#      配置参考「节点3-VLESS+XHTTP 裸协议」：无 REALITY/TLS，security=none，默认端口 16789
 #   - 链接 tag：variant5 = xray-reality-tcp-vision-{privkey}，variant6 = xray-xhttp-cdn
 #   - 导入解析：variant6 xhttp裸协议链接新增 OLD_XHTTP_CDN_* 变量捕获（uuid/port/path）
 #   - mod07 generate_links_xray 同步新增 case 5/6 链接生成
@@ -957,11 +957,11 @@ build_xray_config() {
     # ── Variant 6：裸 xhttp（CDN/直连），无 REALITY，独立输入逻辑 ──
     if [[ "$variant" == "6" ]]; then
         if [[ "${import_choice:-2}" == "1" ]]; then
-            ask_val    port "监听端口（用于CDN回源，建议避开443）" "${OLD_XHTTP_CDN_PORT:-6666}"
+            ask_val    port "监听端口（用于CDN回源，建议避开443）" "${OLD_XHTTP_CDN_PORT:-16789}"
             ask_random uuid "uuid（用户 UUID）" "${OLD_XHTTP_CDN_UUID:-$(gen_uuid)}"
             ask_val    xpath "xhttp path（路径）" "${OLD_XHTTP_CDN_PATH:-/$(openssl rand -hex 6)}"
         else
-            ask_val    port "监听端口（用于CDN回源，建议避开443）" "6666"
+            ask_val    port "监听端口（用于CDN回源，建议避开443）" "16789"
             ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
             ask_val    xpath "xhttp path（路径，留空自动生成随机路径）" "/$(openssl rand -hex 6)"
         fi
