@@ -1,7 +1,32 @@
 #!/bin/bash
 # ── mod05_singbox_config.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 ════════════════════════
+# ════════════════════════ 本次更新说明（最新） ════════════════════════
+# 优化1：xray_reality_menu() 菜单文案更名 + 重新排列（仅改展示层，
+#   内部 build_xray_config() 的变体编号(1-6)与配置生成逻辑完全不变）：
+#   旧名称                                              → 新名称
+#   ① VLESS—REALITY(原版REALITY+防偷跑+有流控)[推荐]     → VLESS—REALITY—tcp (tcp+REALITY+vision+dokodemo) [推荐]
+#   ② VLESS—REALITY(原版REALITY+防偷跑+无流控)           → VLESS—REALITY—tcp (tcp+REALITY+dokodemo)
+#   ③ VLESS—xhttp(xhttp+REALITY，防偷跑版)               → VLESS—REALITY—xhttp (xhttp+REALITY+dokodemo)
+#   ④ VLESS—xhttp(xhttp+REALITY，无防偷跑)               → VLESS—REALITY—xhttp (xhttp+REALITY)
+#   ⑤ VLESS—REALITY—tcp(原版REALITY+无防偷跑+有流控)     → VLESS—REALITY—tcp (tcp+REALITY+vision)
+#   ⑥ VLESS—xhttp(裸协议，用于套CDN或本地直连)           → VLESS—xhttp (裸协议，用于套CDN、上下行分离、本地直连)
+#   新菜单展示顺序：1=旧⑤ 2=旧④ 3=旧① 4=旧② 5=旧③ 6=旧⑥
+#   （xray_reality_menu() 内新增"新→内部旧"编号映射表，选择后再转交
+#     build_xray_config() 用旧编号执行，JSON 结构/节点tag来源完全不受影响）
+#   配套 mod07_gen_links.sh 同步更新 generate_links_xray() 的 tag 文案：
+#     内部变体1→xray-tcp-REALITY-vision-dokodemo-{私钥}
+#     内部变体2→xray-tcp-REALITY-dokodemo-{私钥}
+#     内部变体3→xray-xhttp-REALITY-{私钥}
+#     内部变体4→xray-xhttp-REALITY-dokodemo-{私钥}
+#     内部变体5→xray-tcp-REALITY-vision-{私钥}
+#     内部变体6→VLESS-xhttp-cdn（无私钥后缀）
+# 优化2：mod06_service_mgmt.sh 新增"一键清空 sing-box / Xray 配置"功能
+#   （分别位于 管理sing-box / 管理Xray-core 子菜单内，停止服务释放端口，
+#     删除 config.json 及对应内核订阅链接文件，详见 mod06 顶部注释）
+# ════════════════════════════════════════════════════════════════════
+#
+# ════════════════════════ 历史更新说明 ════════════════════════
 # 优化1 (mod07)：修复 sing-box REALITY 节点生成的链接 address 错误地使用
 #   SNI 域名而非服务器 IP 的 bug（根因：Python 块中 tls_on 为 True 时把 addr
 #   替换成了 sni，对 REALITY 也生效；已改为检测 reality_on 后再决定）
@@ -908,12 +933,12 @@ xray_reality_menu() {
     echo ""
     echo -e "${BOLD}${CYAN}请选择要配置的 Xray 协议 (Xray 目前在此面板支持单选):${NC}"
     echo ""
-    echo "   1)  VLESS — REALITY (原版REALITY+防偷跑 + 有流控) [推荐]"
-    echo "   2)  VLESS — REALITY (原版REALITY+防偷跑 + 无流控)"
-    echo "   3)  VLESS — xhttp (xhttp+REALITY，无防偷跑)"
-    echo "   4)  VLESS — xhttp (xhttp+REALITY，防偷跑版)"
-    echo "   5)  VLESS — REALITY — tcp (原版REALITY+ 无防偷跑 + 有流控)"
-    echo "   6)  VLESS — xhttp (裸协议，用于套CDN或本地直连)"
+    echo "   1)  VLESS — REALITY — tcp (tcp + REALITY + vision)"
+    echo "   2)  VLESS — REALITY — xhttp (xhttp + REALITY)"
+    echo "   3)  VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐]"
+    echo "   4)  VLESS — REALITY — tcp (tcp + REALITY + dokodemo)"
+    echo "   5)  VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo)"
+    echo "   6)  VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连)"
     echo ""
     echo "   0)  返回主菜单"
     echo ""
@@ -921,7 +946,26 @@ xray_reality_menu() {
     xr_choice=${xr_choice:-0}
     [[ "$xr_choice" == "0" ]] && return 1
 
-    build_xray_config "$xr_choice"
+    # 新菜单编号 → build_xray_config() 内部旧变体编号映射表
+    # （仅用于把新排列顺序转换回原有配置生成逻辑，JSON结构/写入路径/节点tag来源均不受影响）
+    #   新1(tcp+vision)              -> 内部5
+    #   新2(xhttp+REALITY)           -> 内部3
+    #   新3(tcp+vision+dokodemo)[推荐] -> 内部1
+    #   新4(tcp+dokodemo)            -> 内部2
+    #   新5(xhttp+dokodemo)          -> 内部4
+    #   新6(裸xhttp)                 -> 内部6
+    local internal_variant
+    case "$xr_choice" in
+        1) internal_variant=5 ;;
+        2) internal_variant=3 ;;
+        3) internal_variant=1 ;;
+        4) internal_variant=2 ;;
+        5) internal_variant=4 ;;
+        6) internal_variant=6 ;;
+        *) log_warn "无效选项: $xr_choice"; press_enter; return 1 ;;
+    esac
+
+    build_xray_config "$internal_variant"
 }
 
 # 通过 Xray 自身生成 REALITY x25519 密钥对，兼容不同版本的输出文案
@@ -936,12 +980,12 @@ build_xray_config() {
     local variant="$1"
     echo ""
     case "$variant" in
-        1) echo -e "${CYAN}  ─── VLESS — REALITY (原版REALITY+防偷跑 + 有流控) ───${NC}" ;;
-        2) echo -e "${CYAN}  ─── VLESS — REALITY (原版REALITY+防偷跑 + 无流控) ───${NC}" ;;
-        3) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，无防偷跑) ───${NC}" ;;
-        4) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，防偷跑版) ───${NC}" ;;
-        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控) ───${NC}" ;;
-        6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN或本地直连) ───${NC}" ;;
+        1) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐] ───${NC}" ;;
+        2) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + dokodemo) ───${NC}" ;;
+        3) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY) ───${NC}" ;;
+        4) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo) ───${NC}" ;;
+        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision) ───${NC}" ;;
+        6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连) ───${NC}" ;;
         *) log_warn "未知选项: $variant"; return 1 ;;
     esac
     echo ""
