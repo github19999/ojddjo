@@ -392,6 +392,14 @@ generate_links_xray() {
             tag="xray-reality-xhttp-anti"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
+        5)
+            tag="xray-reality-tcp"
+            params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
+            ;;
+        6)
+            tag="xray-xhttp-plain"
+            params="encryption=none&security=none&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
+            ;;
         *)
             log_error "未知的 Xray 节点变体: ${VARIANT:-}"
             return 1
@@ -417,8 +425,8 @@ generate_links_xray() {
     echo "[✓] 共生成 1 条 Xray 节点链接"
     echo "[✓] 明文订阅: /usr/local/etc/xray/subscription.txt"
     echo "[✓] Base64订阅 (V2RayN): /usr/local/etc/xray/subscription.b64"
-    if [[ "${VARIANT}" == "3" || "${VARIANT}" == "4" ]]; then
-        echo "[i] 提示: xhttp+REALITY 节点暂不支持自动生成 Clash/Mihomo 配置，请使用支持 xhttp 的客户端导入上方链接"
+    if [[ "${VARIANT}" == "3" || "${VARIANT}" == "4" || "${VARIANT}" == "6" ]]; then
+        echo "[i] 提示: xhttp 节点暂不支持自动生成 Clash/Mihomo 配置，请使用支持 xhttp 的客户端导入上方链接"
     fi
     echo ""
     echo "$link"
