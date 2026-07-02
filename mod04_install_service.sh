@@ -576,9 +576,11 @@ server {
 }
 EOF
     # ── [优化2] 先校验 Nginx 配置，避免证书缺失时 restart 导致 Nginx 彻底宕机 ──
+    # 修复：使用退出码判断而非字符串匹配，避免不同 Nginx 版本/编译输出格式差异导致误判
     local nginx_test_out
     nginx_test_out=$(nginx -t 2>&1)
-    if echo "$nginx_test_out" | grep -q "test is successful"; then
+    local nginx_test_rc=$?
+    if [[ $nginx_test_rc -eq 0 ]]; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续手动检查"
     else
         log_error "Nginx 配置校验失败，已回滚 substore.conf，Nginx 保持原有状态继续运行！"
@@ -772,9 +774,11 @@ server {
 }
 EOF
     # ── [优化2] 先校验 Nginx 配置，避免证书缺失时 restart 导致 Nginx 彻底宕机 ──
+    # 修复：使用退出码判断而非字符串匹配，避免不同 Nginx 版本/编译输出格式差异导致误判
     local nginx_test_out
     nginx_test_out=$(nginx -t 2>&1)
-    if echo "$nginx_test_out" | grep -q "test is successful"; then
+    local nginx_test_rc=$?
+    if [[ $nginx_test_rc -eq 0 ]]; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续手动检查"
     else
         log_error "Nginx 配置校验失败，已回滚 wallos.conf，Nginx 保持原有状态继续运行！"
