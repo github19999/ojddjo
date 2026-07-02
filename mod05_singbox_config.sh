@@ -1,21 +1,8 @@
 #!/bin/bash
 # ── mod05_singbox_config.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 ════════════════════════
-# 优化1 (mod07)：修复 sing-box REALITY 节点生成的链接 address 错误地使用
-#   SNI 域名而非服务器 IP 的 bug（根因：Python 块中 tls_on 为 True 时把 addr
-#   替换成了 sni，对 REALITY 也生效；已改为检测 reality_on 后再决定）
-# 优化2 (mod05 + mod07)：Xray 协议菜单新增两种变体
-#   5) VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控)
-#      配置参考「节点2-VLESS+TCP+REALITY+Vision」：直接监听 0.0.0.0，无 dokodemo-door
-#   6) VLESS — xhttp (裸协议，用于套CDN或本地直连)
-#      配置参考「节点3-VLESS+XHTTP 裸协议」：无 REALITY/TLS，security=none，默认端口 16789
-#   - 链接 tag：variant5 = xray-reality-tcp-vision-{privkey}，variant6 = xray-xhttp-cdn
-#   - 导入解析：variant6 xhttp裸协议链接新增 OLD_XHTTP_CDN_* 变量捕获（uuid/port/path）
-#   - mod07 generate_links_xray 同步新增 case 5/6 链接生成
-#   - 其余 1-4 变体及全部 sing-box 协议逻辑不变
-# ════════════════════════════════════════════════════════════════════
-
+# ════════════════════════ 本次更新说明 (优化2) ════════════════════════
+# 新增：在"是否导入旧节点链接"之后，统一增加"代理核心选择"步骤
 #   - 选 sing-box：完全沿用原有协议选择/生成逻辑（仅将批量选项 16/17 改为 100/101 编号，逻辑不变）
 #   - 选 Xray-core：进入新增的 4 选 1 REALITY/xhttp 协议菜单
 #       1) VLESS-REALITY 原版+防偷跑+有流控
@@ -912,8 +899,6 @@ xray_reality_menu() {
     echo "   2)  VLESS — REALITY (原版REALITY+防偷跑 + 无流控)"
     echo "   3)  VLESS — xhttp (xhttp+REALITY，无防偷跑)"
     echo "   4)  VLESS — xhttp (xhttp+REALITY，防偷跑版)"
-    echo "   5)  VLESS — REALITY — tcp (原版REALITY+ 无防偷跑 + 有流控)"
-    echo "   6)  VLESS — xhttp (裸协议，用于套CDN或本地直连)"
     echo ""
     echo "   0)  返回主菜单"
     echo ""
@@ -940,8 +925,6 @@ build_xray_config() {
         2) echo -e "${CYAN}  ─── VLESS — REALITY (原版REALITY+防偷跑 + 无流控) ───${NC}" ;;
         3) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，无防偷跑) ───${NC}" ;;
         4) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，防偷跑版) ───${NC}" ;;
-        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控) ───${NC}" ;;
-        6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN或本地直连) ───${NC}" ;;
         *) log_warn "未知选项: $variant"; return 1 ;;
     esac
     echo ""
@@ -952,28 +935,19 @@ build_xray_config() {
         return 1
     fi
 
-    local port uuid sn="" shortid="" privkey="" pubkey="" xpath=""
+    local port uuid sn shortid privkey="" pubkey="" xpath=""
 
-    # ── Variant 6：裸 xhttp（CDN/直连），无 REALITY，独立输入逻辑 ──
-    if [[ "$variant" == "6" ]]; then
-        if [[ "${import_choice:-2}" == "1" ]]; then
-            ask_val    port "监听端口（用于CDN回源，建议避开443）" "${OLD_XHTTP_CDN_PORT:-16789}"
-            ask_random uuid "uuid（用户 UUID）" "${OLD_XHTTP_CDN_UUID:-$(gen_uuid)}"
-            ask_val    xpath "xhttp path（路径）" "${OLD_XHTTP_CDN_PATH:-/$(openssl rand -hex 6)}"
-        else
-            ask_val    port "监听端口（用于CDN回源，建议避开443）" "16789"
-            ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
-            ask_val    xpath "xhttp path（路径，留空自动生成随机路径）" "/$(openssl rand -hex 6)"
-        fi
-    # ── Variants 1-5：REALITY 系列，统一输入逻辑 ──
-    elif [[ "${import_choice:-2}" == "1" ]]; then
-        # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
-        # OLD_VLESS_REALITY_* 作为默认值；选择「2) 否，生成全新配置」时纯新生成。
+    # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
+    # OLD_VLESS_REALITY_* 作为默认值；选择「2) 否，生成全新配置」时
+    # （包括 import_choice 为空/默认的情况）一律不检测、不读取任何外部链接，纯新生成。
+    if [[ "${import_choice:-2}" == "1" ]]; then
         ask_val    port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
         ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
         ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
 
         if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
+            # 私钥已直接从旧链接的 tag 中提取出来（本面板生成的 Xray REALITY 链接
+            # 会把 PrivateKey 编码进 tag），无需用户手动粘贴，原样还原
             privkey="$OLD_VLESS_REALITY_PK"
             pubkey="$OLD_VLESS_REALITY_PBK"
             echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
@@ -1207,97 +1181,6 @@ EOF
 }
 EOF
             ;;
-        5)
-            # 原版 REALITY + 无防偷跑 + 有流控：直接监听 0.0.0.0，无 dokodemo-door，
-            # 参考节点2-VLESS+TCP+REALITY+Vision
-            cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning"
-    },
-    "inbounds": [
-        {
-            "tag": "vless-reality-tcp-in",
-            "listen": "0.0.0.0",
-            "port": $port,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "$uuid",
-                        "flow": "xtls-rprx-vision"
-                    }
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": "$sn:443",
-                    "xver": 0,
-                    "serverNames": ["$sn"],
-                    "privateKey": "$privkey",
-                    "shortIds": ["$shortid"]
-                }
-            },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
-            }
-        }
-    ],
-    "outbounds": [
-        {"protocol": "freedom", "tag": "direct"},
-        {"protocol": "blackhole", "tag": "block"}
-    ]
-}
-EOF
-            ;;
-        6)
-            # 裸 xhttp，无 REALITY / TLS，用于套CDN或本地直连
-            # 参考节点3-VLESS+XHTTP 裸协议
-            cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning"
-    },
-    "inbounds": [
-        {
-            "tag": "xhttp-cdn-in",
-            "listen": "0.0.0.0",
-            "port": $port,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "$uuid"
-                    }
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "xhttp",
-                "security": "none",
-                "xhttpSettings": {
-                    "path": "$xpath",
-                    "mode": "auto"
-                }
-            },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
-            }
-        }
-    ],
-    "outbounds": [
-        {"protocol": "freedom", "tag": "direct"},
-        {"protocol": "blackhole", "tag": "block"}
-    ]
-}
-EOF
-            ;;
     esac
 
     # 保存元数据，供 mod07 生成 Xray 订阅链接时使用
@@ -1518,11 +1401,6 @@ for line in input_text.splitlines():
                     if port: vars_out["OLD_VLESS_WS_PORT"] = clean_val(port)
                     if sni: vars_out["OLD_VLESS_WS_SNI"] = clean_val(sni)
                     if "path" in qs: vars_out["OLD_VLESS_WS_PATH"] = clean_val(qs["path"][0])
-                elif type_ == "xhttp" and security not in ("reality",):
-                    # Xray variant 6：裸 xhttp（CDN/直连），无 REALITY，无 TLS
-                    vars_out["OLD_XHTTP_CDN_UUID"] = clean_val(uuid)
-                    if port: vars_out["OLD_XHTTP_CDN_PORT"] = clean_val(port)
-                    if "path" in qs: vars_out["OLD_XHTTP_CDN_PATH"] = clean_val(qs["path"][0])
                 else:
                     vars_out["OLD_VLESS_TCP_UUID"] = clean_val(uuid)
                     if port: vars_out["OLD_VLESS_TCP_PORT"] = clean_val(port)
