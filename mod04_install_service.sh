@@ -9,20 +9,6 @@
 #   - 新增菜单项 17/18/19，插入在 Realm 之后、批量执行之前
 #   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm 卸载与安装逻辑均保持不变）
 # ════════════════════════════════════════════════════════════════════
-#
-# ════════════════════════ 本次更新说明 (修正 & 优化3) ════════════════════════
-#
-# [修正] 修复：Sub-Store / Wallos 无法访问及 Reality 节点不通问题
-#   根因：前一版本过度优化的 nginx -t 校验会在证书尚未存在时直接将生成的 conf 
-#         删除。导致即使后续成功申请证书也缺少端口监听，连带造成回落它的 Reality 瘫痪。
-#   修复：已回退至旧版本逻辑，不再主动删除配置文件，只发出重载警告，确保后续连通。
-#
-# [优化3] 修复：选择 "100) 全部自动执行 (所有服务)" 时未安装 Xray
-#   根因：SVC_CHOICES=(1 4 7 10 14 160) 列表中遗漏了菜单项 17（Xray 最新稳定版）
-#   修复：将列表补全为 SVC_CHOICES=(1 4 7 10 14 160 17)
-#         101（全部手动执行）同步补全，保持一致
-#
-# ════════════════════════════════════════════════════════════════════
 
 
 # ────────────────────────────────────────────────────────────────
@@ -569,7 +555,7 @@ server {
 }
 EOF
     systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
-
+    
     echo ""
     log_success "Sub-Store 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api_path${NC}"
@@ -754,7 +740,7 @@ server {
 }
 EOF
     systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
-
+    
     echo ""
     log_success "Wallos 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443${NC}"
@@ -993,10 +979,10 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160 17)   # [优化3] 补全 Xray 最新稳定版(17)
+            SVC_CHOICES=(1 4 7 10 14 160)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160 17)   # [优化3] 补全 Xray 最新稳定版(17)
+            SVC_CHOICES=(1 4 7 10 14 160)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
             read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
