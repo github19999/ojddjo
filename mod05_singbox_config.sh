@@ -37,6 +37,25 @@
 # 优化1 (mod07)：修复 sing-box REALITY 节点生成的链接 address 错误地使用
 #   SNI 域名而非服务器 IP 的 bug（根因：Python 块中 tls_on 为 True 时把 addr
 #   替换成了 sni，对 REALITY 也生效；已改为检测 reality_on 后再决定）
+# ════════════════════════════════════════════════════════════════════
+#
+# ════════════════ 修复：REALITY 系列导入旧节点 short_id 失效 ════════════════
+# 现象：VLESS-REALITY-xhttp（及理论上所有 REALITY 系列）新建节点能通，
+#   但导入旧节点链接后不通，具体表现为 short_id 与旧链接对不上。
+# 根因：Python urllib.parse.parse_qs() 默认 keep_blank_values=False，
+#   会把值为空的 query 参数（如很多面板默认导出的 &sid=）直接丢弃，
+#   导致 OLD_VLESS_REALITY_SID 未被赋值 -> bash 的 ${VAR:-default} 误判为
+#   "没导入到"，从而随机生成一个新 short_id，和客户端原有配置的空 short_id
+#   对不上，REALITY 握手失败。
+# 修复内容：
+#   1) parse_qs() 增加 keep_blank_values=True，正确保留空值参数
+#   2) sing-box build_vless_reality() 与 Xray build_xray_config() 中，
+#      改用 ${VAR+_} 判断"是否被赋值过"，而不是用 ${VAR:-default}
+#      （后者无法区分"未设置"与"设置为空字符串"）
+#   3) build_xray_config() variant 3/4/5（xhttp 系列 + tcp-vision-only）的
+#      shortIds 数组统一补上 "" 空值兜底，与 variant 1/2 保持一致，
+#      即使以后再出现类似解析遗漏也有一层保护
+# ════════════════════════════════════════════════════════════════════
 # 优化2 (mod05 + mod07)：Xray 协议菜单新增两种变体
 #   5) VLESS — REALITY — tcp (原版REALITY + 无防偷跑 + 有流控)
 #      配置参考「节点2-VLESS+TCP+REALITY+Vision」：直接监听 0.0.0.0，无 dokodemo-door
@@ -288,6 +307,17 @@ build_vless_reality() {
     sid_rand=$(gen_short_id)
     echo ""
 
+    # 修复：旧节点原本 short_id 为空（很多面板默认就是空 short_id）时，
+    # bash 的 ${VAR:-default} 无法区分"变量未设置"和"变量被设置为空字符串"，
+    # 会误把空 short_id 当成"没导入到"，从而随机生成一个新的、导致连不上。
+    # 用 ${VAR+_} 只判断"是否被赋值过"，哪怕值是空字符串也会被正确保留。
+    local si_default
+    if [[ -n "${OLD_VLESS_REALITY_SID+_}" ]]; then
+        si_default="$OLD_VLESS_REALITY_SID"
+    else
+        si_default="$sid_rand"
+    fi
+
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
         pk="$privkey"
         echo -e "  ${GREEN}✓ [自动] private_key = ${pk}${NC}"
@@ -311,7 +341,7 @@ build_vless_reality() {
     fi
     echo ""
 
-    ask_random si "short_id（REALITY Short ID）" "${OLD_VLESS_REALITY_SID:-$sid_rand}"
+    ask_random si "short_id（REALITY Short ID）" "$si_default"
 
     echo ""
     echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
@@ -1047,7 +1077,14 @@ build_xray_config() {
             pubkey="$XRAY_PUBKEY"
         fi
 
-        shortid="${OLD_VLESS_REALITY_SID:-$(openssl rand -hex 8)}"
+        # 修复：原理同 sing-box 分支 —— ${VAR:-default} 无法区分"未导入到 sid"
+        # 和"导入到的 sid 本来就是空字符串"，会把很多面板默认的空 short_id
+        # 误换成随机新值，导致 REALITY 握手 short_id 对不上、连不通。
+        if [[ -n "${OLD_VLESS_REALITY_SID+_}" ]]; then
+            shortid="$OLD_VLESS_REALITY_SID"
+        else
+            shortid="$(openssl rand -hex 8)"
+        fi
     else
         ask_val    port "listen_port（监听端口，建议 443）" "443"
         ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
@@ -1194,7 +1231,7 @@ EOF
                     "dest": "$sn:443",
                     "serverNames": ["$sn"],
                     "privateKey": "$privkey",
-                    "shortIds": ["$shortid"]
+                    "shortIds": ["", "$shortid"]
                 },
                 "xhttpSettings": {
                     "path": "$xpath",
@@ -1261,7 +1298,7 @@ EOF
                     "dest": "$sn:443",
                     "serverNames": ["$sn"],
                     "privateKey": "$privkey",
-                    "shortIds": ["$shortid"]
+                    "shortIds": ["", "$shortid"]
                 },
                 "xhttpSettings": {
                     "path": "$xpath",
@@ -1316,7 +1353,7 @@ EOF
                     "xver": 0,
                     "serverNames": ["$sn"],
                     "privateKey": "$privkey",
-                    "shortIds": ["$shortid"]
+                    "shortIds": ["", "$shortid"]
                 }
             },
             "sniffing": {
@@ -1526,7 +1563,12 @@ for line in input_text.splitlines():
             qs = {}
             query_idx = rest.find("?")
             if query_idx != -1:
-                qs = urllib.parse.parse_qs(rest[query_idx+1:])
+                # keep_blank_values=True：不能省略！很多面板导出的 REALITY 节点
+                # short_id 是空值（如 &sid= ），Python 的 parse_qs 默认会把"值为空"
+                # 的参数直接丢弃，导致这里读不到 sid=""，下面会误判成"没有导入到
+                # short_id"从而随机生成新的，造成新旧节点 short_id 对不上、
+                # REALITY 握手失败（这是本次修复的根因）。
+                qs = urllib.parse.parse_qs(rest[query_idx+1:], keep_blank_values=True)
                 rest = rest[:query_idx]
                 
             at_idx = rest.rfind("@")
