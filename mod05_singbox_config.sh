@@ -899,6 +899,8 @@ xray_reality_menu() {
     echo "   2)  VLESS — REALITY (原版REALITY+防偷跑 + 无流控)"
     echo "   3)  VLESS — xhttp (xhttp+REALITY，无防偷跑)"
     echo "   4)  VLESS — xhttp (xhttp+REALITY，防偷跑版)"
+    echo "   5)  VLESS — REALITY — tcp (原版REALITY+ 无防偷跑 + 有流控)"
+    echo "   6)  VLESS — xhttp (裸协议，用于套CDN或本地直连)"
     echo ""
     echo "   0)  返回主菜单"
     echo ""
@@ -925,6 +927,8 @@ build_xray_config() {
         2) echo -e "${CYAN}  ─── VLESS — REALITY (原版REALITY+防偷跑 + 无流控) ───${NC}" ;;
         3) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，无防偷跑) ───${NC}" ;;
         4) echo -e "${CYAN}  ─── VLESS — xhttp (xhttp+REALITY，防偷跑版) ───${NC}" ;;
+        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (原版REALITY+ 无防偷跑 + 有流控) ───${NC}" ;;
+        6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN或本地直连) ───${NC}" ;;
         *) log_warn "未知选项: $variant"; return 1 ;;
     esac
     echo ""
@@ -943,49 +947,56 @@ build_xray_config() {
     if [[ "${import_choice:-2}" == "1" ]]; then
         ask_val    port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
         ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
-        ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
 
-        if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
-            # 私钥已直接从旧链接的 tag 中提取出来（本面板生成的 Xray REALITY 链接
-            # 会把 PrivateKey 编码进 tag），无需用户手动粘贴，原样还原
-            privkey="$OLD_VLESS_REALITY_PK"
-            pubkey="$OLD_VLESS_REALITY_PBK"
-            echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
-        elif [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
-            echo -e "  ${YELLOW}⚠ 检测到您导入的 REALITY 节点链接中只含 PublicKey（公钥），${NC}"
-            echo -e "  ${YELLOW}REALITY 服务端必须使用与之配对的 PrivateKey（私钥）才能让原节点继续可用。${NC}"
-            read -rp "  > 请粘贴原 PrivateKey (若留空，则生成新密钥对，原节点将失效): " privkey
-            if [[ -n "$privkey" && ${#privkey} -eq 43 ]]; then
+        # variant 6 为裸协议 xhttp（无 TLS/REALITY），无需伪装域名与密钥对
+        if [[ "$variant" != "6" ]]; then
+            ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
+
+            if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
+                # 私钥已直接从旧链接的 tag 中提取出来（本面板生成的 Xray REALITY 链接
+                # 会把 PrivateKey 编码进 tag），无需用户手动粘贴，原样还原
+                privkey="$OLD_VLESS_REALITY_PK"
                 pubkey="$OLD_VLESS_REALITY_PBK"
+                echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
+            elif [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
+                echo -e "  ${YELLOW}⚠ 检测到您导入的 REALITY 节点链接中只含 PublicKey（公钥），${NC}"
+                echo -e "  ${YELLOW}REALITY 服务端必须使用与之配对的 PrivateKey（私钥）才能让原节点继续可用。${NC}"
+                read -rp "  > 请粘贴原 PrivateKey (若留空，则生成新密钥对，原节点将失效): " privkey
+                if [[ -n "$privkey" && ${#privkey} -eq 43 ]]; then
+                    pubkey="$OLD_VLESS_REALITY_PBK"
+                else
+                    log_info "未提供有效私钥，正在通过 Xray 生成全新 REALITY 密钥对..."
+                    gen_xray_reality_keypair
+                    privkey="$XRAY_PRIVKEY"
+                    pubkey="$XRAY_PUBKEY"
+                fi
             else
-                log_info "未提供有效私钥，正在通过 Xray 生成全新 REALITY 密钥对..."
+                log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
                 gen_xray_reality_keypair
                 privkey="$XRAY_PRIVKEY"
                 pubkey="$XRAY_PUBKEY"
             fi
-        else
-            log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
-            gen_xray_reality_keypair
-            privkey="$XRAY_PRIVKEY"
-            pubkey="$XRAY_PUBKEY"
-        fi
 
-        if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
-            shortid="$OLD_VLESS_REALITY_SID"
-        else
-            shortid=$(openssl rand -hex 8)
+            if [[ -n "$OLD_VLESS_REALITY_SID" ]]; then
+                shortid="$OLD_VLESS_REALITY_SID"
+            else
+                shortid=$(openssl rand -hex 8)
+            fi
         fi
     else
         ask_val    port "listen_port（监听端口，建议 443）" "443"
         ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
-        ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
 
-        log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
-        gen_xray_reality_keypair
-        privkey="$XRAY_PRIVKEY"
-        pubkey="$XRAY_PUBKEY"
+        if [[ "$variant" != "6" ]]; then
+            ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
 
-        shortid=$(openssl rand -hex 8)
+            log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
+            gen_xray_reality_keypair
+            privkey="$XRAY_PRIVKEY"
+            pubkey="$XRAY_PUBKEY"
+
+            shortid=$(openssl rand -hex 8)
+        fi
     fi
 
     mkdir -p /usr/local/etc/xray /var/log/xray
@@ -1178,6 +1189,96 @@ EOF
             {"inboundTag": ["xhttp-reality-in"], "outboundTag": "direct"}
         ]
     }
+}
+EOF
+            ;;
+        5)
+            cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "tag": "vless-reality-tcp-in",
+            "listen": "0.0.0.0",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid",
+                        "flow": "xtls-rprx-vision",
+                        "email": "vless-reality-tcp"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "$sn:443",
+                    "xver": 0,
+                    "serverNames": ["$sn"],
+                    "privateKey": "$privkey",
+                    "shortIds": ["$shortid"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        }
+    ],
+    "outbounds": [
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"}
+    ]
+}
+EOF
+            ;;
+        6)
+            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
+            cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "tag": "vless-xhttp-plain-in",
+            "listen": "0.0.0.0",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid",
+                        "email": "vless-xhttp-plain"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "security": "none",
+                "xhttpSettings": {
+                    "path": "$xpath",
+                    "mode": "auto"
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        }
+    ],
+    "outbounds": [
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"}
+    ]
 }
 EOF
             ;;
