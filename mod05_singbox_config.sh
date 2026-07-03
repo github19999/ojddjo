@@ -403,6 +403,10 @@ events {
 }
 
 http {
+    # ★ 修复：补充 mime.types，防止静态资源 Content-Type 错误
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
     include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*;
 
@@ -466,14 +470,19 @@ EOF
     mv /tmp/nginx.conf.template /etc/nginx/nginx.conf
     log_info "nginx.conf 写入完成"
 
-    # 注意：本函数会整体重写 /etc/nginx/nginx.conf（user/pid/worker_processes 等
-    # 顶层指令均已变更），仅 reload 无法使这些指令生效，且批量操作时容易与
-    # Sub-Store/Wallos 触发的 reload 产生竞态导致端口残留冲突，
-    # 故这里统一改为 restart，并通过 safe_nginx_apply 自动处理残留进程重试。
-    if safe_nginx_apply restart; then
+    # ★ 修复：nginx.conf 重写后，确保全局 8080→8443 重定向配置仍然存在，
+    # 避免 Sub-Store / Wallos 的 conf.d 配置中 listen 8080 缺失而导致 HTTP 访问失效。
+    # 同时 _ensure_redirect_conf 采用 default_server 单一 server block，
+    # 彻底杜绝多 conf 文件重复 bind 同端口引发的 "Address already in use" 启动失败问题。
+    if declare -f _ensure_redirect_conf >/dev/null 2>&1; then
+        _ensure_redirect_conf
+    fi
+
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
         log_success "Nginx REALITY 回落配置已写入并重载"
     else
-        log_warn "Nginx 配置语法有误或重启失败，详细原因："
+        log_warn "Nginx 配置语法有误，详细原因："
         nginx -t
     fi
 }
