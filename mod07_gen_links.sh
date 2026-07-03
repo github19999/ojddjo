@@ -392,18 +392,6 @@ generate_links_xray() {
             tag="xray-reality-xhttp-anti"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
-        5)
-            # VLESS — REALITY — tcp 原版REALITY + 无防偷跑 + 有流控
-            # 直接监听 0.0.0.0，连接地址即服务器真实 IP
-            tag="xray-reality-tcp-vision"
-            params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
-            ;;
-        6)
-            # VLESS — xhttp 裸协议，用于套CDN或本地直连
-            # security=none，无 REALITY，客户端直连服务器真实 IP
-            tag="xray-xhttp-bare"
-            params="encryption=none&security=none&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
-            ;;
         *)
             log_error "未知的 Xray 节点变体: ${VARIANT:-}"
             return 1
@@ -411,9 +399,9 @@ generate_links_xray() {
     esac
 
     local tag_enc
-    # 把 PrivateKey 编码进 tag(#fragment) 末尾（仅 REALITY 协议）：下次把这条链接粘贴回面板「导入旧节点」时，
+    # 把 PrivateKey 编码进 tag(#fragment) 末尾：下次把这条链接粘贴回面板「导入旧节点」时，
     # mod05 的解析器会自动从 tag 末尾的 43 位 base64url 串还原私钥，无需再手动粘贴
-    if [[ -n "${PRIVATE_KEY:-}" && "${VARIANT}" != "6" ]]; then
+    if [[ -n "${PRIVATE_KEY:-}" ]]; then
         tag="${tag}-${PRIVATE_KEY}"
     fi
     tag_enc=$(urlencode "$tag")
@@ -431,9 +419,6 @@ generate_links_xray() {
     echo "[✓] Base64订阅 (V2RayN): /usr/local/etc/xray/subscription.b64"
     if [[ "${VARIANT}" == "3" || "${VARIANT}" == "4" ]]; then
         echo "[i] 提示: xhttp+REALITY 节点暂不支持自动生成 Clash/Mihomo 配置，请使用支持 xhttp 的客户端导入上方链接"
-    fi
-    if [[ "${VARIANT}" == "6" ]]; then
-        echo "[i] 提示: xhttp 裸协议节点用于套CDN或本地直连，请在客户端填写对应的CDN域名/IP，不支持自动生成 Clash/Mihomo 配置"
     fi
     echo ""
     echo "$link"
