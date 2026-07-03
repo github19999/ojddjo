@@ -171,6 +171,10 @@ install_nginx() {
 <body><h1>It works!</h1></body></html>
 HTML
     fi
+    
+    # 【核心修复】清理系统自带的 Nginx 默认站点配置，确保 80/8080 端口完全释放，不与其他面板产生底层冲突
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    
     systemctl enable nginx >/dev/null 2>&1 || true
     systemctl start nginx >/dev/null 2>&1 || true
     systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败"
@@ -316,6 +320,13 @@ EOF
         local ver
         ver=$(xray version 2>/dev/null | head -1)
         log_success "Xray-core 安装成功: $ver"
+        
+        # 【核心修复】：防止官方脚本自带的默认 config.json 占用端口，引发 Nginx 启动冲突
+        if [[ -f /usr/local/etc/xray/config.json ]] && ! grep -q -E "dokodemo-in|vless-reality-in|xhttp-reality-in" /usr/local/etc/xray/config.json; then
+            mv /usr/local/etc/xray/config.json /usr/local/etc/xray/config.json.default.bak 2>/dev/null || true
+            systemctl stop xray >/dev/null 2>&1 || true
+        fi
+
         if [[ -s /usr/local/etc/xray/config.json ]]; then
             if xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
                 systemctl enable xray >/dev/null 2>&1 || true
@@ -1087,6 +1098,12 @@ EOF
                         local ver
                         ver=$(sing-box version 2>/dev/null | head -1)
                         log_success "sing-box 安装成功: $ver"
+                        
+                        # 【核心修复】：防止官方安装包自带的默认 config.json 占用 8080 等端口引发 Nginx/Substore 启动冲突
+                        if [[ -f /etc/sing-box/config.json ]] && ! grep -q -E "vless-|vmess-|trojan-|shadowsocks-|hysteria2-|tuic-|anytls-|naive-" /etc/sing-box/config.json; then
+                            mv /etc/sing-box/config.json /etc/sing-box/config.json.default.bak 2>/dev/null || true
+                            systemctl stop sing-box >/dev/null 2>&1 || true
+                        fi
                         
                         # 尝试自动启动 (若已存在有效配置)
                         if [[ -s /etc/sing-box/config.json ]]; then
