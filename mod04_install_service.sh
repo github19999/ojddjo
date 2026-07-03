@@ -131,6 +131,58 @@ uninstall_xray() {
 }
 
 # ────────────────────────────────────────────────────────────────
+#  Nginx 安全重载/重启封装（修复：批量安装/连续操作时偶发的
+#  "bind() ... Address already in use" 端口残留冲突问题）
+#
+#  问题根因：Sub-Store / Wallos 安装、以及 sing-box REALITY 节点配置
+#  (setup_nginx_reality) 都会各自触发一次 nginx reload/restart。当这些
+#  操作在批量执行中短时间内连续发生，或前一次 reload 因证书路径尚未就绪
+#  等原因未能完全生效时，可能残留旧的 nginx 进程仍占用 8080/8443 端口，
+#  导致下一次 restart 时新进程 bind() 失败（Address already in use）。
+#  该函数统一在重载/重启前做语法校验，若常规 reload/restart 失败，会自动
+#  清理残留的 nginx 进程后重试一次，避免用户需要手动重启两次才能生效。
+#  不改变任何已有的安装/配置逻辑，仅将原来分散的
+#  "systemctl reload nginx || systemctl restart nginx" 调用统一收口。
+# ────────────────────────────────────────────────────────────────
+safe_nginx_apply() {
+    local action="${1:-reload}"   # reload：仅新增/修改 conf.d 站点时使用；restart：nginx.conf 主配置被整体改写时使用
+
+    if ! is_cmd_exist nginx; then
+        return 1
+    fi
+
+    # 1) 先校验语法，配置有问题就不要贸然重启，避免打断现网正在运行的 Nginx
+    local _t_out
+    if ! _t_out=$(nginx -t 2>&1); then
+        log_error "Nginx 配置校验未通过，已跳过重载/重启，避免中断现有服务："
+        echo "$_t_out"
+        return 1
+    fi
+
+    # 2) 常规方式应用配置
+    if [[ "$action" == "reload" ]] && systemctl is-active --quiet nginx 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null && return 0
+    fi
+    systemctl restart nginx 2>/dev/null && return 0
+
+    # 3) 常规重启失败，多为残留的旧 nginx 进程仍占用端口（连续多次安装/重装时的时序问题）
+    #    彻底停止并清理残留进程后重试一次
+    log_warn "Nginx 常规重启失败，检测到端口可能被残留进程占用，正在自动清理后重试..."
+    systemctl stop nginx 2>/dev/null || true
+    pkill -9 -f "nginx: master process" 2>/dev/null || true
+    pkill -9 -f "nginx: worker process" 2>/dev/null || true
+    sleep 1
+
+    if nginx -t >/dev/null 2>&1 && systemctl start nginx 2>/dev/null; then
+        log_success "已自动清理残留进程并成功重启 Nginx"
+        return 0
+    fi
+
+    log_error "Nginx 重启仍然失败，请执行「systemctl status nginx」及「journalctl -xeu nginx」查看详情"
+    return 1
+}
+
+# ────────────────────────────────────────────────────────────────
 #  三、安装服务（sing-box / Nginx / Docker环境 / 面板 / Realm）
 # ────────────────────────────────────────────────────────────────
 install_nginx() {
@@ -554,7 +606,7 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
+    safe_nginx_apply reload || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在（详见上方错误信息）"
     
     echo ""
     log_success "Sub-Store 部署完成！"
@@ -739,7 +791,7 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
+    safe_nginx_apply reload || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在（详见上方错误信息）"
     
     echo ""
     log_success "Wallos 部署完成！"
