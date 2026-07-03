@@ -132,16 +132,28 @@ uninstall_xray() {
 
 # ────────────────────────────────────────────────────────────────
 #  Nginx 安全重载/重启封装（修复：批量安装/连续操作时偶发的
-#  "bind() ... Address already in use" 端口残留冲突问题）
+#  "bind() ... Address already in use" 端口冲突问题）
 #
-#  问题根因：Sub-Store / Wallos 安装、以及 sing-box REALITY 节点配置
-#  (setup_nginx_reality) 都会各自触发一次 nginx reload/restart。当这些
-#  操作在批量执行中短时间内连续发生，或前一次 reload 因证书路径尚未就绪
-#  等原因未能完全生效时，可能残留旧的 nginx 进程仍占用 8080/8443 端口，
-#  导致下一次 restart 时新进程 bind() 失败（Address already in use）。
-#  该函数统一在重载/重启前做语法校验，若常规 reload/restart 失败，会自动
-#  清理残留的 nginx 进程后重试一次，避免用户需要手动重启两次才能生效。
-#  不改变任何已有的安装/配置逻辑，仅将原来分散的
+#  问题根因排查：
+#   - 起初怀疑仅是本脚本自身的旧 nginx 进程未完全退出（残留进程占用端口），
+#     但实测发现：即便先 systemctl stop + 强制 kill 掉所有 nginx 进程，
+#     等待后重新 start 依然 bind() 失败——说明真正占用该端口（典型是 8080）
+#     的其实是【系统里其他与本脚本无关的进程/服务】，并非 nginx 自身残留。
+#   - 8080 端口在 Sub-Store / Wallos 的配置里，仅用于「HTTP 自动跳转到
+#     HTTPS」这一便利功能，真正的面板访问走的是 8443（脚本安装完成后提示的
+#     访问地址本身就是 https://域名:8443/...），并非核心功能。
+#   - 因此，只要 8080 长期被外部进程占用、确认无法释放，就不应该让这一个
+#     非关键端口拖垮整个 Nginx（进而导致 8443 面板、REALITY 回落等所有依赖
+#     Nginx 的功能一起不可用），而是自动降级：跳过 8080 跳转配置，让 Nginx
+#     以其余配置正常启动。
+#
+#  该函数在重载/重启前做语法校验；常规 reload/restart 失败后，依次尝试：
+#   1) 清理本脚本自身可能残留的旧 nginx 进程并重试；
+#   2) 从 journalctl 中定位具体冲突端口，找到并结束真正占用该端口的进程后重试；
+#   3) 若冲突端口是 8080，且以上两步仍无法释放，则自动禁用 Sub-Store/Wallos
+#      配置中对应的 8080 跳转 server 块（改前会自动备份原文件），确保 Nginx
+#      及其承载的 8443 面板、REALITY 回落等功能仍可正常使用。
+#  不改变任何其他安装/配置逻辑，仅将原来分散的
 #  "systemctl reload nginx || systemctl restart nginx" 调用统一收口。
 # ────────────────────────────────────────────────────────────────
 safe_nginx_apply() {
@@ -163,19 +175,94 @@ safe_nginx_apply() {
     if [[ "$action" == "reload" ]] && systemctl is-active --quiet nginx 2>/dev/null; then
         systemctl reload nginx 2>/dev/null && return 0
     fi
-    systemctl restart nginx 2>/dev/null && return 0
+    if systemctl restart nginx 2>/dev/null; then
+        return 0
+    fi
 
-    # 3) 常规重启失败，多为残留的旧 nginx 进程仍占用端口（连续多次安装/重装时的时序问题）
-    #    彻底停止并清理残留进程后重试一次
-    log_warn "Nginx 常规重启失败，检测到端口可能被残留进程占用，正在自动清理后重试..."
+    log_warn "Nginx 常规重启失败，正在自动诊断端口占用情况..."
+
+    # 3) 第一步：清理本脚本自身可能残留的旧 nginx 进程（进程未完全退出导致的假冲突）
     systemctl stop nginx 2>/dev/null || true
     pkill -9 -f "nginx: master process" 2>/dev/null || true
     pkill -9 -f "nginx: worker process" 2>/dev/null || true
     sleep 1
-
     if nginx -t >/dev/null 2>&1 && systemctl start nginx 2>/dev/null; then
-        log_success "已自动清理残留进程并成功重启 Nginx"
+        log_success "已自动清理残留 Nginx 进程并成功重启"
         return 0
+    fi
+
+    # 4) 第二步：清理残留 nginx 进程后依然失败，说明冲突端口被【非本脚本管理的其他进程】占用。
+    #    从最近的启动日志中定位具体是哪个/哪些端口 bind() 失败
+    local _conflict_ports
+    _conflict_ports=$(journalctl -u nginx -n 60 --no-pager 2>/dev/null | grep -oP 'bind\(\) to (?:\[::\]|0\.0\.0\.0):\K[0-9]+' | sort -u)
+
+    if [[ -z "$_conflict_ports" ]]; then
+        log_error "Nginx 重启仍然失败，请执行「systemctl status nginx」及「journalctl -xeu nginx」查看详情"
+        return 1
+    fi
+
+    log_warn "检测到以下端口被系统中其他进程占用（非本脚本管理）：$(echo "$_conflict_ports" | tr '\n' ' ')"
+
+    local _freed_any=false _p _pids _pid _pname
+    for _p in $_conflict_ports; do
+        _pids=""
+        if is_cmd_exist ss; then
+            _pids=$(ss -H -ltnp "( sport = :$_p )" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | sort -u)
+        fi
+        if [[ -z "$_pids" ]] && is_cmd_exist fuser; then
+            _pids=$(fuser "${_p}/tcp" 2>/dev/null)
+        fi
+        for _pid in $_pids; do
+            [[ -z "$_pid" || "$_pid" == "1" ]] && continue
+            _pname=$(ps -p "$_pid" -o comm= 2>/dev/null)
+            log_warn "端口 $_p 被进程 PID=$_pid（${_pname:-未知进程}）占用，正在尝试结束该进程以释放端口..."
+            kill -9 "$_pid" 2>/dev/null && _freed_any=true
+        done
+    done
+
+    if [[ "$_freed_any" == "true" ]]; then
+        sleep 1
+        if nginx -t >/dev/null 2>&1 && systemctl start nginx 2>/dev/null; then
+            log_success "已结束占用端口的进程并成功重启 Nginx"
+            return 0
+        fi
+    fi
+
+    # 5) 第三步：端口仍无法释放（很可能是系统级、不可/不应结束的进程长期占用）。
+    #    若冲突端口是 8080，自动禁用 Sub-Store/Wallos 中对应的 8080 跳转配置，
+    #    避免这一个非核心端口导致 Nginx（及其后 8443 面板、REALITY 回落）整体瘫痪。
+    if echo "$_conflict_ports" | grep -qx "8080"; then
+        local f
+        for f in /etc/nginx/conf.d/substore.conf /etc/nginx/conf.d/wallos.conf; do
+            [[ -f "$f" ]] || continue
+            grep -q "listen 8080;" "$f" || continue
+            cp "$f" "${f}.bak_$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+            awk '
+                /^server \{$/ { buf=$0"\n"; capturing=1; has8080=0; next }
+                capturing {
+                    buf = buf $0 "\n"
+                    if ($0 ~ /listen 8080;/) has8080=1
+                    if ($0 ~ /^\}$/) {
+                        if (has8080) {
+                            n = split(buf, arr, "\n")
+                            for (i=1; i<=n; i++) if (arr[i] != "") print "# " arr[i]
+                        } else {
+                            printf "%s", buf
+                        }
+                        capturing=0
+                        next
+                    }
+                    next
+                }
+                { print }
+            ' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
+        done
+        log_warn "端口 8080 被系统中其他进程长期占用，已自动禁用 Sub-Store/Wallos 的 8080 跳转配置（原文件已备份为 .bak_*，不影响通过 8443 正常访问面板），正在重新尝试启动 Nginx..."
+
+        if nginx -t >/dev/null 2>&1 && systemctl start nginx 2>/dev/null; then
+            log_success "已自动规避冲突端口并成功启动 Nginx，面板可通过 8443 正常访问"
+            return 0
+        fi
     fi
 
     log_error "Nginx 重启仍然失败，请执行「systemctl status nginx」及「journalctl -xeu nginx」查看详情"
