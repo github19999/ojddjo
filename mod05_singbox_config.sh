@@ -941,15 +941,24 @@ build_xray_config() {
 
     local port uuid sn shortid privkey="" pubkey="" xpath=""
 
-    # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
-    # OLD_VLESS_REALITY_* 作为默认值；选择「2) 否，生成全新配置」时
-    # （包括 import_choice 为空/默认的情况）一律不检测、不读取任何外部链接，纯新生成。
-    if [[ "${import_choice:-2}" == "1" ]]; then
-        ask_val    port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
-        ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
-
-        # variant 6 为裸协议 xhttp（无 TLS/REALITY），无需伪装域名与密钥对
-        if [[ "$variant" != "6" ]]; then
+    if [[ "$variant" == "6" ]]; then
+        # ── variant 6：xhttp 裸协议，无 REALITY，无需密钥对和 SNI ──
+        if [[ "${import_choice:-2}" == "1" ]]; then
+            ask_val    port "listen_port（监听端口，建议 80/8080/6666）" "${OLD_VLESS_REALITY_PORT:-6666}"
+            ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
+        else
+            ask_val    port "listen_port（监听端口，建议 80/8080/6666）" "6666"
+            ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+        fi
+        ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
+    else
+        # ── variant 1-5：REALITY 协议，需要密钥对、SNI、shortId ──
+        # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
+        # OLD_VLESS_REALITY_* 作为默认值；选择「2) 否，生成全新配置」时
+        # （包括 import_choice 为空/默认的情况）一律不检测、不读取任何外部链接，纯新生成。
+        if [[ "${import_choice:-2}" == "1" ]]; then
+            ask_val    port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
+            ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
             ask_val    sn   "伪装域名 SNI / REALITY dest" "${OLD_VLESS_REALITY_SNI:-www.icloud.com}"
 
             if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
@@ -982,12 +991,9 @@ build_xray_config() {
             else
                 shortid=$(openssl rand -hex 8)
             fi
-        fi
-    else
-        ask_val    port "listen_port（监听端口，建议 443）" "443"
-        ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
-
-        if [[ "$variant" != "6" ]]; then
+        else
+            ask_val    port "listen_port（监听端口，建议 443）" "443"
+            ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
             ask_val    sn   "伪装域名 SNI / REALITY dest" "www.icloud.com"
 
             log_info "正在通过 Xray 生成全新 REALITY 密钥对..."
@@ -1193,6 +1199,8 @@ EOF
 EOF
             ;;
         5)
+            # VLESS — REALITY — tcp 原版REALITY + 无防偷跑 + 有流控
+            # 参考节点2.conf：直接监听 0.0.0.0，不走 dokodemo-door，有 flow=xtls-rprx-vision
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1208,8 +1216,7 @@ EOF
                 "clients": [
                     {
                         "id": "$uuid",
-                        "flow": "xtls-rprx-vision",
-                        "email": "vless-reality-tcp"
+                        "flow": "xtls-rprx-vision"
                     }
                 ],
                 "decryption": "none"
@@ -1240,7 +1247,8 @@ EOF
 EOF
             ;;
         6)
-            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
+            # VLESS — xhttp 裸协议，用于套CDN或本地直连
+            # 参考节点3.conf：security=none，无 REALITY，直接 xhttp
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1248,15 +1256,14 @@ EOF
     },
     "inbounds": [
         {
-            "tag": "vless-xhttp-plain-in",
+            "tag": "vless-xhttp-bare-in",
             "listen": "0.0.0.0",
             "port": $port,
             "protocol": "vless",
             "settings": {
                 "clients": [
                     {
-                        "id": "$uuid",
-                        "email": "vless-xhttp-plain"
+                        "id": "$uuid"
                     }
                 ],
                 "decryption": "none"
