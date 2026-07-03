@@ -944,13 +944,15 @@ build_xray_config() {
     if [[ "$variant" == "6" ]]; then
         # ── variant 6：xhttp 裸协议，无 REALITY，无需密钥对和 SNI ──
         if [[ "${import_choice:-2}" == "1" ]]; then
-            ask_val    port "listen_port（监听端口，建议 80/8080/6666）" "${OLD_VLESS_REALITY_PORT:-6666}"
-            ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
+            ask_val    port  "listen_port（监听端口，建议 80/8080/6666）" "${OLD_XHTTP_BARE_PORT:-6666}"
+            ask_random uuid  "uuid（用户 UUID）" "${OLD_XHTTP_BARE_UUID:-$(gen_uuid)}"
         else
-            ask_val    port "listen_port（监听端口，建议 80/8080/6666）" "6666"
-            ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+            ask_val    port  "listen_port（监听端口，建议 80/8080/6666）" "6666"
+            ask_random uuid  "uuid（用户 UUID）" "$(gen_uuid)"
         fi
-        ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
+        local _bare_path_default="${OLD_XHTTP_BARE_PATH:-}"
+        [[ -z "$_bare_path_default" ]] && _bare_path_default="/$(openssl rand -hex 6)"
+        ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "$_bare_path_default"
     else
         # ── variant 1-5：REALITY 协议，需要密钥对、SNI、shortId ──
         # 仅当用户在上一步明确选择「1) 是，导入旧节点链接」时，才读取解析出的
@@ -1481,7 +1483,12 @@ for line in input_text.splitlines():
                 flow = ""
                 if "flow" in qs:
                     flow = qs["flow"][0]
-                if security == "reality" or "reality" in tag:
+                if security == "none" and type_ == "xhttp":
+                    # xhttp 裸协议（variant 6）：security=none，无 REALITY，专项存储
+                    vars_out["OLD_XHTTP_BARE_UUID"] = clean_val(uuid)
+                    if port: vars_out["OLD_XHTTP_BARE_PORT"] = clean_val(port)
+                    if "path" in qs: vars_out["OLD_XHTTP_BARE_PATH"] = clean_val(qs["path"][0])
+                elif security == "reality" or "reality" in tag:
                     vars_out["OLD_VLESS_REALITY_UUID"] = clean_val(uuid)
                     if port: vars_out["OLD_VLESS_REALITY_PORT"] = clean_val(port)
                     if sni: vars_out["OLD_VLESS_REALITY_SNI"] = clean_val(sni)
