@@ -309,7 +309,7 @@ menu_manage_nginx() {
                 press_enter ;;
             3)
                 if [[ "$is_installed" == "true" ]]; then
-                    safe_nginx_apply restart
+                    systemctl restart nginx
                     echo ""
                     systemctl status nginx --no-pager || true
                 else
