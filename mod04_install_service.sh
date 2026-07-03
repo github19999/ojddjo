@@ -133,28 +133,6 @@ uninstall_xray() {
 # ────────────────────────────────────────────────────────────────
 #  三、安装服务（sing-box / Nginx / Docker环境 / 面板 / Realm）
 # ────────────────────────────────────────────────────────────────
-
-# ★ 新增辅助函数：确保全局 HTTP 8080→HTTPS 8443 重定向配置存在
-# 所有面板（Sub-Store、Wallos 等）共用此单一 server block，
-# 彻底避免多个 conf 文件重复 listen 8080 导致端口冲突而 Nginx 无法启动的问题。
-_ensure_redirect_conf() {
-    local redirect_conf="/etc/nginx/conf.d/00_redirect.conf"
-    mkdir -p /etc/nginx/conf.d
-    if [[ ! -f "$redirect_conf" ]]; then
-        cat > "$redirect_conf" << 'REDIREOF'
-# 全局 HTTP → HTTPS 重定向（Sub-Store / Wallos 等面板共用）
-# 由 vpsge 自动生成，请勿手动删除；删除后面板 HTTP 访问将无法自动跳转 HTTPS
-server {
-    listen 8080 default_server;
-    listen [::]:8080 default_server;
-    server_name _;
-    return 301 https://$host:8443$request_uri;
-}
-REDIREOF
-        log_info "已生成全局 8080→8443 重定向配置: $redirect_conf"
-    fi
-}
-
 install_nginx() {
     local mode="${1:-1}"
     log_step "安装 Nginx..."
@@ -549,8 +527,13 @@ EOF
     mkdir -p /etc/nginx/conf.d
     
     # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
-    # ★ 修复：去除 listen 8080 block，统一由 00_redirect.conf 管理，防止多面板时端口重复 bind 冲突
     cat > /etc/nginx/conf.d/substore.conf <<EOF
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name $sn;
+    return 301 https://\$host:8443\$request_uri;
+}
 server {
     listen 8443 ssl;
     listen [::]:8443 ssl;
@@ -571,8 +554,6 @@ server {
     }
 }
 EOF
-    # 确保全局 8080→8443 重定向配置存在（所有面板共用一个 server block，避免端口冲突）
-    _ensure_redirect_conf
     systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
     
     echo ""
@@ -734,8 +715,13 @@ EOF
     mkdir -p /etc/nginx/conf.d
     
     # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
-    # ★ 修复：去除 listen 8080 block，统一由 00_redirect.conf 管理，防止多面板时端口重复 bind 冲突
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name $sn;
+    return 301 https://\$host:8443\$request_uri;
+}
 server {
     listen 8443 ssl;
     listen [::]:8443 ssl;
@@ -753,8 +739,6 @@ server {
     }
 }
 EOF
-    # 确保全局 8080→8443 重定向配置存在（所有面板共用一个 server block，避免端口冲突）
-    _ensure_redirect_conf
     systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
     
     echo ""
