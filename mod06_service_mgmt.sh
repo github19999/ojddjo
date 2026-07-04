@@ -193,7 +193,16 @@ menu_manage_xray() {
         case $opt in
             1)
                 if [[ "$is_installed" == "true" ]]; then
-                    systemctl start xray && log_success "Xray-core 已启动"
+                    # 【核心修复】清除 failed 状态，避免 "start request repeated too quickly" 拒绝启动
+                    systemctl reset-failed xray 2>/dev/null || true
+                    systemctl start xray
+                    sleep 1
+                    if systemctl is-active --quiet xray 2>/dev/null; then
+                        log_success "Xray-core 已启动"
+                    else
+                        log_error "Xray-core 启动失败，请选择「9) 验证配置文件」或「4) 查看完整状态」排查原因"
+                        systemctl status xray --no-pager 2>/dev/null | tail -20 || true
+                    fi
                 else log_error "未安装 Xray-core"; fi
                 press_enter ;;
             2)
@@ -203,7 +212,10 @@ menu_manage_xray() {
                 press_enter ;;
             3)
                 if [[ "$is_installed" == "true" ]]; then
+                    # 【核心修复】先 reset-failed 再 restart，防止 throttle 累积导致失败
+                    systemctl reset-failed xray 2>/dev/null || true
                     systemctl restart xray
+                    sleep 1
                     echo ""
                     systemctl status xray --no-pager || true
                 else log_error "未安装 Xray-core"; fi
@@ -240,9 +252,11 @@ menu_manage_xray() {
             9)
                 if is_cmd_exist xray; then
                     if [[ -f /usr/local/etc/xray/config.json ]]; then
-                        local _xc_out
-                        _xc_out=$(xray run -test -config /usr/local/etc/xray/config.json 2>&1)
-                        if [[ $? -eq 0 ]]; then
+                        local _xc_out _xc_rc
+                        # 【核心修复】使用正确的 xray -test 语法（非 run -test）
+                        _xc_out=$(xray -test -config /usr/local/etc/xray/config.json 2>&1)
+                        _xc_rc=$?
+                        if [[ $_xc_rc -eq 0 ]]; then
                             log_success "配置验证通过"
                         else
                             log_error "配置验证失败，详细原因："
