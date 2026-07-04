@@ -782,7 +782,6 @@ Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
-DynamicUser=true
 WorkingDirectory=/root/realm
 ExecStart=/root/realm/realm -c /root/realm/config.toml
 
