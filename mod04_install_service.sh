@@ -292,8 +292,18 @@ install_xray() {
 
     mkdir -p /usr/local/etc/xray /var/log/xray
 
-    if [[ ! -f /etc/systemd/system/xray.service ]]; then
-        cat > /etc/systemd/system/xray.service << 'EOF'
+    # 【核心修复1】官方 install-release.sh 会在 Drop-In 目录写入
+    # /etc/systemd/system/xray.service.d/10-donot_touch_single_conf.conf
+    # 该文件会覆盖 ExecStart，使自定义 service 无效。
+    # 统一清除所有官方 Drop-In，保证我们自己的 service 完整生效。
+    if [[ -d /etc/systemd/system/xray.service.d ]]; then
+        rm -f /etc/systemd/system/xray.service.d/10-donot_touch_single_conf.conf
+        # 若目录已空则删除，避免残留空目录干扰
+        rmdir /etc/systemd/system/xray.service.d 2>/dev/null || true
+    fi
+
+    # 无论是否已存在，都强制写入我们标准的 service 文件，确保参数正确
+    cat > /etc/systemd/system/xray.service << 'EOF'
 [Unit]
 Description=Xray Service
 Documentation=https://github.com/xtls
@@ -307,30 +317,46 @@ NoNewPrivileges=true
 ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
 Restart=on-failure
 RestartPreventExitStatus=23
+RestartSec=3s
 LimitNPROC=10000
 LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-    fi
+    systemctl daemon-reload
+    # 【核心修复2】清除 systemd 因之前崩溃积累的 failed 状态，
+    # 避免 "Start request repeated too quickly" 导致后续所有启动请求被拒绝
+    systemctl reset-failed xray 2>/dev/null || true
 
     if is_cmd_exist xray; then
         local ver
         ver=$(xray version 2>/dev/null | head -1)
         log_success "Xray-core 安装成功: $ver"
         
-        # 【核心修复】：防止官方脚本自带的默认 config.json 占用端口，引发 Nginx 启动冲突
+        # 防止官方脚本自带的默认 config.json 占用端口，引发 Nginx 启动冲突
         if [[ -f /usr/local/etc/xray/config.json ]] && ! grep -q -E "dokodemo-in|vless-reality-in|xhttp-reality-in" /usr/local/etc/xray/config.json; then
             mv /usr/local/etc/xray/config.json /usr/local/etc/xray/config.json.default.bak 2>/dev/null || true
             systemctl stop xray >/dev/null 2>&1 || true
         fi
 
         if [[ -s /usr/local/etc/xray/config.json ]]; then
-            if xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+            # 【核心修复3】用 -test 而非 run -test，且正确捕获返回值
+            local _xtest_out
+            _xtest_out=$(xray -test -config /usr/local/etc/xray/config.json 2>&1)
+            if [[ $? -eq 0 ]]; then
                 systemctl enable xray >/dev/null 2>&1 || true
+                systemctl reset-failed xray 2>/dev/null || true
                 systemctl start xray >/dev/null 2>&1 || true
+                sleep 1
+                if systemctl is-active --quiet xray 2>/dev/null; then
+                    log_success "Xray-core 已成功启动并运行"
+                else
+                    log_warn "Xray-core 启动异常，请前往「五、服务管理 → 管理 Xray-core」检查状态"
+                fi
+            else
+                log_warn "配置验证未通过，暂不启动 Xray-core:"
+                echo "$_xtest_out"
             fi
         else
             log_info "提醒: Xray-core 核心已就绪。请前往主菜单「四、配置节点」选择 Xray-core 内核生成配置，完成后系统将自动守护运行。"
@@ -782,7 +808,6 @@ Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
-DynamicUser=true
 WorkingDirectory=/root/realm
 ExecStart=/root/realm/realm -c /root/realm/config.toml
 
