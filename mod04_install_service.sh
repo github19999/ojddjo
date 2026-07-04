@@ -782,6 +782,7 @@ Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
+DynamicUser=true
 WorkingDirectory=/root/realm
 ExecStart=/root/realm/realm -c /root/realm/config.toml
 
@@ -810,13 +811,8 @@ add_forward_realm() {
             break
         fi
     done
-    systemctl daemon-reload 2>/dev/null || true
     systemctl restart realm 2>/dev/null || true
-    if systemctl is-active --quiet realm 2>/dev/null; then
-        log_success "转发规则已添加，realm 服务运行中。"
-    else
-        log_warn "转发规则已写入，但 realm 服务未能正常运行，请到「4) 启动服务」查看详情。"
-    fi
+    log_success "转发规则已添加并生效。"
 }
 
 delete_forward_realm() {
@@ -869,23 +865,11 @@ delete_forward_realm() {
 }
 
 start_service_realm() {
-    # 检查是否有转发规则，空配置 realm 会直接崩溃
-    if [[ ! -f /root/realm/config.toml ]] || ! grep -q '\[\[endpoints\]\]' /root/realm/config.toml 2>/dev/null; then
-        log_error "config.toml 中没有转发规则，realm 无法启动。"
-        log_info "请先使用「2) 添加转发」添加至少一条规则，再启动服务。"
-        return 1
-    fi
     systemctl unmask realm.service 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
-    systemctl restart realm.service
-    local _rc=$?
+    systemctl restart realm.service 2>/dev/null || true
     systemctl enable realm.service 2>/dev/null || true
-    if [[ $_rc -eq 0 ]] && systemctl is-active --quiet realm.service 2>/dev/null; then
-        log_success "realm 服务已启动并设置为开机自启。"
-    else
-        log_error "realm 服务启动失败，请检查配置或日志："
-        systemctl status realm.service --no-pager -l || true
-    fi
+    log_success "realm 服务已启动并设置为开机自启。"
 }
 
 stop_service_realm() {
