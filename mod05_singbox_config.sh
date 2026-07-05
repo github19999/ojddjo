@@ -908,7 +908,22 @@ xray_reality_menu() {
     xr_choice=${xr_choice:-0}
     [[ "$xr_choice" == "0" ]] && return 1
 
-    build_xray_config "$xr_choice"
+    # 菜单序号重排后需将用户选择映射到内部 variant 编号
+    # 内部 variant 含义:
+    #   1 → 原版 REALITY tcp + dokodemo + vision [推荐]
+    #   2 → 原版 REALITY tcp + dokodemo，无流控
+    #   3 → xhttp + REALITY，无防偷跑
+    #   4 → xhttp + REALITY + dokodemo
+    #   5 → REALITY tcp + vision，无防偷跑（直接监听）
+    #   6 → xhttp 裸协议
+    # 新菜单序号 → 内部 variant: 1→5  2→3  3→1  4→2  5→4  6→6
+    local _variant_map=([1]=5 [2]=3 [3]=1 [4]=2 [5]=4 [6]=6)
+    local real_variant="${_variant_map[$xr_choice]}"
+    if [[ -z "$real_variant" ]]; then
+        echo "无效选项"; return 1
+    fi
+
+    build_xray_config "$real_variant"
 }
 
 # 通过 Xray 自身生成 REALITY x25519 密钥对，兼容不同版本的输出文案
@@ -923,11 +938,11 @@ build_xray_config() {
     local variant="$1"
     echo ""
     case "$variant" in
-        1) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision) ───${NC}" ;;
-        2) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY) ───${NC}" ;;
-        3) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) ───${NC}" ;;
-        4) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + dokodemo) ───${NC}" ;;
-        5) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo) ───${NC}" ;;
+        1) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) ───${NC}" ;;
+        2) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + dokodemo) ───${NC}" ;;
+        3) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY) ───${NC}" ;;
+        4) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo) ───${NC}" ;;
+        5) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision) ───${NC}" ;;
         6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连) ───${NC}" ;;
         *) log_warn "未知选项: $variant"; return 1 ;;
     esac
@@ -1010,119 +1025,9 @@ build_xray_config() {
     mkdir -p /usr/local/etc/xray /var/log/xray
 
     case "$variant" in
-        1)
-            # VLESS — REALITY — tcp (tcp + REALITY + vision)
-            # 直接监听 0.0.0.0，不走 dokodemo-door，有 flow=xtls-rprx-vision
-            cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning"
-    },
-    "inbounds": [
-        {
-            "tag": "xray-tcp-REALITY-vision-${privkey}",
-            "listen": "0.0.0.0",
-            "port": $port,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "$uuid",
-                        "flow": "xtls-rprx-vision"
-                    }
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": "$sn:443",
-                    "xver": 0,
-                    "serverNames": ["$sn"],
-                    "privateKey": "$privkey",
-                    "shortIds": ["$shortid"]
-                }
-            },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"]
-            }
-        }
-    ],
-    "outbounds": [
-        {"protocol": "freedom", "tag": "direct"},
-        {"protocol": "blackhole", "tag": "block"}
-    ]
-}
-EOF
-            ;;
-        2)
-            # VLESS — REALITY — xhttp (xhttp + REALITY)
-            # xhttp+REALITY，无防偷跑（dokodemo-door）
-            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
-            cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning"
-    },
-    "inbounds": [
-        {
-            "tag": "xray-xhttp-REALITY-${privkey}",
-            "listen": "0.0.0.0",
-            "port": $port,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "$uuid",
-                        "flow": "",
-                        "email": "xhttp-reality"
-                    }
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "xhttp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": "$sn:443",
-                    "serverNames": ["$sn"],
-                    "privateKey": "$privkey",
-                    "shortIds": ["$shortid"]
-                },
-                "xhttpSettings": {
-                    "path": "$xpath",
-                    "mode": "auto"
-                }
-            }
-        }
-    ],
-    "outbounds": [
-        {"tag": "direct", "protocol": "freedom"},
-        {"tag": "block", "protocol": "blackhole"}
-    ],
-    "routing": {
-        "rules": [
-            {"type": "field", "inboundTag": ["xray-xhttp-REALITY-${privkey}"], "outboundTag": "direct"}
-        ]
-    }
-}
-EOF
-            ;;
-        3|4)
-            # 新3：VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐]
-            # 新4：VLESS — REALITY — tcp (tcp + REALITY + dokodemo)
+        1|2)
             local flow_line=""
-            local node_tag=""
-            if [[ "$variant" == "3" ]]; then
-                flow_line='"flow": "xtls-rprx-vision",'
-                node_tag="xray-tcp-REALITY-vision-dokodemo-${privkey}"
-            else
-                node_tag="xray-tcp-REALITY-dokodemo-${privkey}"
-            fi
+            [[ "$variant" == "1" ]] && flow_line='"flow": "xtls-rprx-vision",'
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1145,7 +1050,7 @@ EOF
             }
         },
         {
-            "tag": "$node_tag",
+            "tag": "vless-reality-in",
             "listen": "127.0.0.1",
             "port": 8444,
             "protocol": "vless",
@@ -1189,9 +1094,59 @@ EOF
 }
 EOF
             ;;
-        5)
-            # VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo)
-            # xhttp+REALITY+防偷跑（dokodemo-door）
+        3)
+            ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
+            cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "tag": "xhttp-reality-in",
+            "listen": "0.0.0.0",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid",
+                        "flow": "",
+                        "email": "xhttp-reality"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "$sn:443",
+                    "serverNames": ["$sn"],
+                    "privateKey": "$privkey",
+                    "shortIds": ["$shortid"]
+                },
+                "xhttpSettings": {
+                    "path": "$xpath",
+                    "mode": "auto"
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {"tag": "direct", "protocol": "freedom"},
+        {"tag": "block", "protocol": "blackhole"}
+    ],
+    "routing": {
+        "rules": [
+            {"type": "field", "inboundTag": ["xhttp-reality-in"], "outboundTag": "direct"}
+        ]
+    }
+}
+EOF
+            ;;
+        4)
             ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
             cat > /usr/local/etc/xray/config.json << EOF
 {
@@ -1215,7 +1170,7 @@ EOF
             }
         },
         {
-            "tag": "xray-xhttp-REALITY-dokodemo-${privkey}",
+            "tag": "xhttp-reality-in",
             "listen": "127.0.0.1",
             "port": 8444,
             "protocol": "vless",
@@ -1254,15 +1209,15 @@ EOF
         "rules": [
             {"inboundTag": ["dokodemo-in"], "domain": ["$sn"], "outboundTag": "direct"},
             {"inboundTag": ["dokodemo-in"], "outboundTag": "block"},
-            {"inboundTag": ["xray-xhttp-REALITY-dokodemo-${privkey}"], "outboundTag": "direct"}
+            {"inboundTag": ["xhttp-reality-in"], "outboundTag": "direct"}
         ]
     }
 }
 EOF
             ;;
-        6)
-            # VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连)
-            # security=none，无 REALITY，直接 xhttp
+        5)
+            # VLESS — REALITY — tcp 原版REALITY + 无防偷跑 + 有流控
+            # 参考节点2.conf：直接监听 0.0.0.0，不走 dokodemo-door，有 flow=xtls-rprx-vision
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1270,7 +1225,55 @@ EOF
     },
     "inbounds": [
         {
-            "tag": "VLESS-xhttp-cdn",
+            "tag": "vless-reality-tcp-in",
+            "listen": "0.0.0.0",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid",
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "$sn:443",
+                    "xver": 0,
+                    "serverNames": ["$sn"],
+                    "privateKey": "$privkey",
+                    "shortIds": ["$shortid"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"]
+            }
+        }
+    ],
+    "outbounds": [
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"}
+    ]
+}
+EOF
+            ;;
+        6)
+            # VLESS — xhttp 裸协议，用于套CDN或本地直连
+            # 参考节点3.conf：security=none，无 REALITY，直接 xhttp
+            cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "tag": "vless-xhttp-bare-in",
             "listen": "0.0.0.0",
             "port": $port,
             "protocol": "vless",
