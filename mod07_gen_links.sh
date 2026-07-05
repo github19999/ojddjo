@@ -377,31 +377,34 @@ generate_links_xray() {
     local tag="" link="" params=""
     case "${VARIANT:-1}" in
         1)
-            tag="xray-reality-vision"
+            # VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐]
+            tag="xray-tcp-REALITY-vision-dokodemo"
             params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
             ;;
         2)
-            tag="xray-reality"
+            # VLESS — REALITY — tcp (tcp + REALITY + dokodemo)
+            tag="xray-tcp-REALITY-dokodemo"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
             ;;
         3)
-            tag="xray-reality-xhttp"
+            # VLESS — REALITY — xhttp (xhttp + REALITY)
+            tag="xray-xhttp-REALITY"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
         4)
-            tag="xray-reality-xhttp-anti"
+            # VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo)
+            tag="xray-xhttp-REALITY-dokodemo"
             params="encryption=none&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
         5)
-            # VLESS — REALITY — tcp 原版REALITY + 无防偷跑 + 有流控
-            # 直接监听 0.0.0.0，连接地址即服务器真实 IP
-            tag="xray-reality-tcp-vision"
+            # VLESS — REALITY — tcp (tcp + REALITY + vision)，直接监听 0.0.0.0
+            tag="xray-tcp-REALITY-vision"
             params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none"
             ;;
         6)
-            # VLESS — xhttp 裸协议，用于套CDN或本地直连
+            # VLESS — xhttp 裸协议，用于套CDN、上下行分离、本地直连
             # security=none，无 REALITY，客户端直连服务器真实 IP
-            tag="xray-xhttp-bare"
+            tag="VLESS-xhttp-cdn"
             params="encryption=none&security=none&type=xhttp&path=$(urlencode "${XHTTP_PATH:-/}")&mode=auto"
             ;;
         *)
