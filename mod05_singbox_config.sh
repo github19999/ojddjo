@@ -3,15 +3,13 @@
 #
 # ════════════════════════ 本次更新说明 (优化2) ════════════════════════
 # 新增：在"是否导入旧节点链接"之后，统一增加"代理核心选择"步骤
-#   - 选 sing-box：完全沿用原有协议选择/生成逻辑（将批量选项 100 设为自动配置，101 设为交互确认）
-#   - 选 Xray-core：进入新增的 6 选 1 REALITY/xhttp 协议菜单
-#       1) VLESS — REALITY — tcp (tcp + REALITY + vision)
-#       2) VLESS — REALITY — xhttp (xhttp + REALITY)
-#       3) VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐]
-#       4) VLESS — REALITY — tcp (tcp + REALITY + dokodemo)
-#       5) VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo)
-#       6) VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连)
-#     六种配置结构均参考标准模板实现，分别写入 /usr/local/etc/xray/config.json
+#   - 选 sing-box：完全沿用原有协议选择/生成逻辑（仅将批量选项 16/17 改为 100/101 编号，逻辑不变）
+#   - 选 Xray-core：进入新增的 4 选 1 REALITY/xhttp 协议菜单
+#       1) VLESS-REALITY 原版+防偷跑+有流控
+#       2) VLESS-REALITY 原版+防偷跑+无流控
+#       3) VLESS-xhttp+REALITY 无防偷跑
+#       4) VLESS-xhttp+REALITY 防偷跑版
+#     四种配置结构均参考 节点1.conf 标准模板实现，分别写入 /usr/local/etc/xray/config.json
 #   - 导入旧节点时，REALITY 链接的 uuid/port/sni/pbk/sid 仍可被沿用到 Xray 配置（复用原有解析逻辑）
 #   - 未修改任何原有 sing-box 协议 build_* 函数与生成逻辑
 # ════════════════════════════════════════════════════════════════════
@@ -927,7 +925,7 @@ build_xray_config() {
     case "$variant" in
         1) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision) ───${NC}" ;;
         2) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY) ───${NC}" ;;
-        3) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐] ───${NC}" ;;
+        3) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) ───${NC}" ;;
         4) echo -e "${CYAN}  ─── VLESS — REALITY — tcp (tcp + REALITY + dokodemo) ───${NC}" ;;
         5) echo -e "${CYAN}  ─── VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo) ───${NC}" ;;
         6) echo -e "${CYAN}  ─── VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连) ───${NC}" ;;
@@ -1011,19 +1009,10 @@ build_xray_config() {
 
     mkdir -p /usr/local/etc/xray /var/log/xray
 
-    # 根据对应选项生成目标 tag
-    local IN_TAG=""
-    case "$variant" in
-        1) IN_TAG="xray-tcp-REALITY-vision-${privkey}" ;;
-        2) IN_TAG="xray-xhttp-REALITY-${privkey}" ;;
-        3) IN_TAG="xray-tcp-REALITY-vision-dokodemo-${privkey}" ;;
-        4) IN_TAG="xray-tcp-REALITY-dokodemo-${privkey}" ;;
-        5) IN_TAG="xray-xhttp-REALITY-dokodemo-${privkey}" ;;
-        6) IN_TAG="VLESS-xhttp-cdn" ;;
-    esac
-
     case "$variant" in
         1)
+            # VLESS — REALITY — tcp (tcp + REALITY + vision)
+            # 直接监听 0.0.0.0，不走 dokodemo-door，有 flow=xtls-rprx-vision
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1031,7 +1020,7 @@ build_xray_config() {
     },
     "inbounds": [
         {
-            "tag": "$IN_TAG",
+            "tag": "xray-tcp-REALITY-vision-${privkey}",
             "listen": "0.0.0.0",
             "port": $port,
             "protocol": "vless",
@@ -1070,6 +1059,8 @@ build_xray_config() {
 EOF
             ;;
         2)
+            # VLESS — REALITY — xhttp (xhttp + REALITY)
+            # xhttp+REALITY，无防偷跑（dokodemo-door）
             ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
             cat > /usr/local/etc/xray/config.json << EOF
 {
@@ -1078,7 +1069,7 @@ EOF
     },
     "inbounds": [
         {
-            "tag": "$IN_TAG",
+            "tag": "xray-xhttp-REALITY-${privkey}",
             "listen": "0.0.0.0",
             "port": $port,
             "protocol": "vless",
@@ -1115,15 +1106,23 @@ EOF
     ],
     "routing": {
         "rules": [
-            {"type": "field", "inboundTag": ["$IN_TAG"], "outboundTag": "direct"}
+            {"type": "field", "inboundTag": ["xray-xhttp-REALITY-${privkey}"], "outboundTag": "direct"}
         ]
     }
 }
 EOF
             ;;
         3|4)
+            # 新3：VLESS — REALITY — tcp (tcp + REALITY + vision + dokodemo) [推荐]
+            # 新4：VLESS — REALITY — tcp (tcp + REALITY + dokodemo)
             local flow_line=""
-            [[ "$variant" == "3" ]] && flow_line='"flow": "xtls-rprx-vision",'
+            local node_tag=""
+            if [[ "$variant" == "3" ]]; then
+                flow_line='"flow": "xtls-rprx-vision",'
+                node_tag="xray-tcp-REALITY-vision-dokodemo-${privkey}"
+            else
+                node_tag="xray-tcp-REALITY-dokodemo-${privkey}"
+            fi
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1146,7 +1145,7 @@ EOF
             }
         },
         {
-            "tag": "$IN_TAG",
+            "tag": "$node_tag",
             "listen": "127.0.0.1",
             "port": 8444,
             "protocol": "vless",
@@ -1191,6 +1190,8 @@ EOF
 EOF
             ;;
         5)
+            # VLESS — REALITY — xhttp (xhttp + REALITY + dokodemo)
+            # xhttp+REALITY+防偷跑（dokodemo-door）
             ask_val xpath "xhttp path（路径，留空自动生成随机路径）" "${OLD_VLESS_REALITY_PATH:-/$(openssl rand -hex 6)}"
             cat > /usr/local/etc/xray/config.json << EOF
 {
@@ -1214,7 +1215,7 @@ EOF
             }
         },
         {
-            "tag": "$IN_TAG",
+            "tag": "xray-xhttp-REALITY-dokodemo-${privkey}",
             "listen": "127.0.0.1",
             "port": 8444,
             "protocol": "vless",
@@ -1253,13 +1254,15 @@ EOF
         "rules": [
             {"inboundTag": ["dokodemo-in"], "domain": ["$sn"], "outboundTag": "direct"},
             {"inboundTag": ["dokodemo-in"], "outboundTag": "block"},
-            {"inboundTag": ["$IN_TAG"], "outboundTag": "direct"}
+            {"inboundTag": ["xray-xhttp-REALITY-dokodemo-${privkey}"], "outboundTag": "direct"}
         ]
     }
 }
 EOF
             ;;
         6)
+            # VLESS — xhttp (裸协议，用于套CDN、上下行分离、本地直连)
+            # security=none，无 REALITY，直接 xhttp
             cat > /usr/local/etc/xray/config.json << EOF
 {
     "log": {
@@ -1267,7 +1270,7 @@ EOF
     },
     "inbounds": [
         {
-            "tag": "$IN_TAG",
+            "tag": "VLESS-xhttp-cdn",
             "listen": "0.0.0.0",
             "port": $port,
             "protocol": "vless",
@@ -1314,7 +1317,6 @@ EOF
         echo "PRIVATE_KEY=$privkey"
         echo "SHORT_ID=$shortid"
         echo "VARIANT=$variant"
-        echo "TAG=$IN_TAG"
         [[ -n "$xpath" ]] && echo "XHTTP_PATH=$xpath"
     } > /etc/xray/node_meta.conf
     chmod 600 /etc/xray/node_meta.conf
@@ -1676,20 +1678,20 @@ PYEOF
         fi
 
         AUTO_DEFAULT=false
-        local has_auto=false
-        local has_interactive=false
+        local has_101=false
+        local has_100=false
         
         for choice in "${PROTO_CHOICES[@]}"; do
-            if [[ "$choice" == "100" ]]; then has_auto=true; fi
-            if [[ "$choice" == "101" ]]; then has_interactive=true; fi
+            if [[ "$choice" == "101" ]]; then has_101=true; fi
+            if [[ "$choice" == "100" ]]; then has_100=true; fi
         done
 
-        if [[ "$has_auto" == "true" ]]; then
+        if [[ "$has_100" == "true" ]]; then
             PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
             AUTO_DEFAULT=true
             log_info "已选择全部自动配置，将使用提取或默认参数静默生成所有节点..."
             sleep 1
-        elif [[ "$has_interactive" == "true" ]]; then
+        elif [[ "$has_101" == "true" ]]; then
             PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
             log_info "已选择全部配置，即将逐一进行交互确认..."
             sleep 1
