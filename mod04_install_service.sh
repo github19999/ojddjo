@@ -14,7 +14,17 @@
 #   容易造成连接被重置、登录页出现 "Network error"。
 #   现改为 proxy_set_header Connection $http_connection; 根据客户端实际请求头动态传递，
 #   普通请求走 keep-alive，WebSocket 升级请求依旧能正常工作。
-#   仅修改了这一处配置，未改动任何其他功能与安装逻辑。
+#
+# ════════════════════════ 本次更新说明 (优化4：修复反代 Host 头丢失端口号) ════════════════════════
+# 修复：Sub-Store / Wallos / Komari 的 Nginx 反代配置中，均使用 proxy_set_header Host $host;
+#   而 Nginx 的 $host 变量【永远不带端口号】。由于三者都统一部署在 8443 端口，
+#   浏览器发出的 Origin 请求头是 https://域名:8443（带端口），
+#   但后端收到的 Host 请求头却是 域名（不带端口），两者不一致。
+#   部分应用（例如 Komari，其内置 cors_origin_check_enabled 默认开启）会用这种不一致
+#   判定请求来源不可信，直接返回 403 拒绝——包括登录接口在内，导致登录页出现 "Network error"。
+#   现统一改为 proxy_set_header Host $http_host; 完整保留客户端实际发送的 Host:端口，
+#   从根本上解决该类反代场景下的来源校验误判问题。
+#   本次仅修改了这三处配置中的 Host 请求头，未改动任何其他功能与安装逻辑。
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -564,7 +574,7 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:3001;
-        proxy_set_header Host \$host;
+        proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -752,7 +762,7 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:8282;
-        proxy_set_header Host \$host;
+        proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -963,7 +973,7 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:25774;
-        proxy_set_header Host \$host;
+        proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
