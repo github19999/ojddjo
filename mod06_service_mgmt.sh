@@ -1,12 +1,15 @@
 #!/bin/bash
 # ── mod06_service_mgmt.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 (配套优化1/2) ════════════════════════
+# ════════════════════════ 本次更新说明 (配套优化1/2/3) ════════════════════════
 # 新增：管理 Xray-core 服务的子菜单 menu_manage_xray()，与 menu_manage_singbox()
 #   保持同样的交互风格（启动/停止/重启/状态/开机自启/日志/验证配置/卸载）
 #   - 验证配置使用 `xray run -test -config`
 #   - 卸载调用 mod04 中新增的 uninstall_xray()
-# 「五、服务管理」主菜单新增第 7 项「管理 Xray-core」，原有 1-6/100 项编号与功能不变
+# 新增：管理 Komari 探针的子菜单 menu_manage_komari()，与 menu_manage_substore() /
+#   menu_manage_wallos() 保持同样的交互风格（启动/停止/重启/日志/找回地址/卸载）
+# 「五、服务管理」主菜单新增第 7 项「管理 Xray-core」、第 8 项「管理 Komari」，
+#   原有 1-6/100 项编号与功能不变
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -529,6 +532,70 @@ menu_manage_wallos() {
     done
 }
 
+menu_manage_komari() {
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}══ 管理 Komari (探针监控) ══${NC}"
+        echo ""
+
+        local is_installed=false
+        if is_cmd_exist docker && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^komari$"; then
+            is_installed=true
+        fi
+
+        local status_str="${RED}○ 未安装${NC}"
+        if [[ "$is_installed" == "true" ]]; then
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^komari$"; then
+                status_str="${GREEN}● 运行中${NC}"
+            else
+                status_str="${YELLOW}○ 已停止${NC}"
+            fi
+        fi
+
+        echo -e "  服务状态: $status_str"
+        echo ""
+        echo "  1) 启动 Komari"
+        echo "  2) 停止 Komari"
+        echo "  3) 重启 Komari"
+        echo "  4) 查看实时日志"
+        echo "  5) 找回面板访问地址"
+        echo "  6) 卸载 Komari"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
+        case $opt in
+            1) docker start komari 2>/dev/null && log_success "已启动" || log_error "操作失败/未安装"; press_enter ;;
+            2) docker stop komari 2>/dev/null && log_success "已停止" || log_error "操作失败/未安装"; press_enter ;;
+            3) docker restart komari 2>/dev/null && log_success "已重启" || log_error "操作失败/未安装"; press_enter ;;
+            4) docker logs -f komari 2>/dev/null || log_error "操作失败/未安装"; press_enter ;;
+            5)
+                if [[ -f /root/docker/komari/domain.txt ]]; then
+                    local k_sn=$(cat /root/docker/komari/domain.txt)
+                    echo -e "  🌐 面板访问地址: ${GREEN}https://$k_sn:8443${NC}"
+                else
+                    log_error "未找到配置信息，可能尚未安装。"
+                fi
+                press_enter
+                ;;
+            6)
+                echo -e "${YELLOW}警告：这将彻底删除 Komari 及其所有数据！${NC}"
+                read -rp "确认卸载？(y/N): " choice
+                if [[ "${choice,,}" == "y" ]]; then
+                    docker stop komari 2>/dev/null || true
+                    docker rm komari 2>/dev/null || true
+                    rm -rf /root/docker/komari
+                    log_success "Komari 已彻底卸载"
+                fi
+                press_enter
+                ;;
+            0) return ;;
+            *) log_warn "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
 menu_service() {
     while true; do
         clear
@@ -541,6 +608,7 @@ menu_service() {
         echo "  5) 管理 Wallos"
         echo "  6) 管理 Realm (端口转发)"
         echo "  7) 管理 Xray-core"
+        echo "  8) 管理 Komari (探针监控)"
         echo ""
         echo " 100) 更新脚本"
         echo ""
@@ -556,6 +624,7 @@ menu_service() {
             5) menu_manage_wallos ;;
             6) menu_manage_realm ;;
             7) menu_manage_xray ;;
+            8) menu_manage_komari ;;
             100) update_script ;;
             0) return ;;
             *) log_warn "无效选择" ;;
