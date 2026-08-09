@@ -1,13 +1,12 @@
 #!/bin/bash
 # ── mod04_install_service.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 (优化1) ════════════════════════
-# 新增：核心代理 Xray-core 的安装支持（最新稳定版 / 指定版本号 / Beta预发布版）
-#   - 稳定版与 Beta 版：调用 XTLS 官方一键安装脚本 install-release.sh
-#   - 指定版本号：直接从 GitHub Releases 下载对应版本的二进制包（与 sing-box
-#     模式2 指定版本号的做法一致），避免官方脚本不支持旧版本号的问题
-#   - 新增菜单项 17/18/19，插入在 Realm 之后、批量执行之前
-#   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm 卸载与安装逻辑均保持不变）
+# ════════════════════════ 本次更新说明 (优化2) ════════════════════════
+# 新增：Komari 探针监控面板的安装支持（最新稳定版 / 指定版本号 / 预发布Snapshot版）
+#   - 部署方式与 Wallos / Sub-Store 完全一致：Docker 部署 + Nginx 反代到独立 8443 端口
+#   - 支持已安装检测、导入旧链接、域名冲突检测、证书路径询问
+#   - 新增菜单项 20/21/22，插入在 Xray 之后、批量执行之前
+#   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm / Xray 卸载与安装逻辑均保持不变）
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -758,6 +757,220 @@ EOF
     echo ""
 }
 
+install_komari() {
+    local komari_ver_choice="${1:-1}"
+    local komari_tag="latest"
+
+    local is_installed=false
+    if [[ -d /root/docker/komari ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^komari$"; then
+        is_installed=true
+    fi
+
+    local old_komari_domain=""
+    if [[ "$is_installed" == "true" ]]; then
+        log_warn "检测到您的服务器中 Komari 探针已经部署过了！"
+        if [[ -f /root/docker/komari/domain.txt ]]; then
+            local k_sn=$(cat /root/docker/komari/domain.txt)
+            echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$k_sn:8443${NC}"
+        fi
+        echo "  1) 不重新安装 (保留现有) [默认]"
+        echo "  2) 重新安装 (覆盖更新)"
+        echo "  3) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-3, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
+        if [[ "$choice" == "1" ]]; then return 0; fi
+
+        docker stop komari 2>/dev/null || true
+        docker rm komari 2>/dev/null || true
+
+        if [[ "$choice" == "3" ]]; then
+            read -rp "请粘贴旧的 Komari 面板链接 (例如 https://komari.xxx.com:8443): " old_komari_link
+            if [[ -n "$old_komari_link" ]]; then
+                if [[ "$old_komari_link" =~ ^https://([^/:]+) ]]; then
+                    old_komari_domain="${BASH_REMATCH[1]}"
+                    log_success "成功提取旧配置: 域名=$old_komari_domain"
+                else
+                    log_warn "未能识别链接格式，将使用常规方式配置。"
+                fi
+            fi
+        fi
+    else
+        echo -e "
+${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
+        if [[ "$choice" == "2" ]]; then
+            read -rp "请粘贴旧的 Komari 面板链接 (例如 https://komari.xxx.com:8443): " old_komari_link
+            if [[ -n "$old_komari_link" ]]; then
+                if [[ "$old_komari_link" =~ ^https://([^/:]+) ]]; then
+                    old_komari_domain="${BASH_REMATCH[1]}"
+                    log_success "成功提取旧配置: 域名=$old_komari_domain"
+                else
+                    log_warn "未能识别链接格式，将使用常规方式配置。"
+                fi
+            fi
+        fi
+    fi
+
+    if [[ "$komari_ver_choice" == "1" ]]; then
+        komari_tag="latest"
+    elif [[ "$komari_ver_choice" == "2" ]]; then
+        ask_val komari_tag "请输入待部署的 Komari 镜像版本号 (例如 1.3.2)" "latest"
+    elif [[ "$komari_ver_choice" == "3" ]]; then
+        log_info "正在获取 Github 预发布版(Snapshot)标签..."
+        local pre_tag=$(curl -s https://api.github.com/repos/komari-monitor/komari/releases | grep '"tag_name":' | head -n 1 | cut -d '"' -f 4)
+        if [[ -n "$pre_tag" ]]; then
+            komari_tag="$pre_tag"
+        else
+            log_warn "未能获取预发布版标签，回退为 latest"
+            komari_tag="latest"
+        fi
+    fi
+
+    install_docker_env 1
+
+    if ! is_cmd_exist nginx; then
+        log_warn "未检测到 Nginx，正在尝试自动预装..."
+        install_nginx 1
+    fi
+
+    log_step "部署 Komari (轻量级服务器监控探针) - 镜像版本: $komari_tag"
+
+    local sn=""
+    local cp=""
+    local kp=""
+    if [[ -n "$old_komari_domain" ]]; then
+        sn="$old_komari_domain"
+        local prev_auto="$AUTO_DEFAULT"
+        AUTO_DEFAULT="true"
+        ask_cert_paths "$sn"
+        cp="$CERT_PATH"
+        kp="$KEY_PATH"
+        AUTO_DEFAULT="$prev_auto"
+    else
+        while true; do
+            # 强制在选择域名时弹出版单给出选择（Komari 默认选项 3）
+            local prev_auto="$AUTO_DEFAULT"
+            AUTO_DEFAULT="false"
+            select_server_name "komari.example.com" "" "3"
+            sn="$SELECTED_SN"
+            AUTO_DEFAULT="$prev_auto"
+
+            local conflict=false
+            if [[ -f /root/docker/substore/domain.txt ]]; then
+                local sub_sn=$(cat /root/docker/substore/domain.txt)
+                [[ "$sn" == "$sub_sn" ]] && conflict=true
+            fi
+            if [[ -f /root/docker/wallos/domain.txt ]]; then
+                local wal_sn=$(cat /root/docker/wallos/domain.txt)
+                [[ "$sn" == "$wal_sn" ]] && conflict=true
+            fi
+
+            if [[ "$conflict" == "true" ]]; then
+                echo -e "${RED}[ERROR] 域名冲突拦截！检测到该域名已被其他面板占用。${NC}"
+                echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
+                echo ""
+                continue
+            fi
+            break
+        done
+        ask_cert_paths "$sn"
+        cp="$CERT_PATH"
+        kp="$KEY_PATH"
+    fi
+
+    if [[ ! -f "$cp" || ! -f "$kp" ]]; then
+        log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
+        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
+        log_warn "请后续确保将正确的证书文件放置于: $cp"
+    fi
+
+    mkdir -p /root/docker/komari/data
+    cd /root/docker/komari
+    echo "$sn" > domain.txt
+
+    local admin_user=""
+    local admin_pass=""
+    read -rp "请输入 Komari 初始管理员用户名 (回车则由系统随机生成): " admin_user
+    read -rp "请输入 Komari 初始管理员密码 (回车则由系统随机生成): " admin_pass
+
+    cat > docker-compose.yml <<EOF
+version: '3.8'
+services:
+  komari:
+    image: ghcr.io/komari-monitor/komari:$komari_tag
+    container_name: komari
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:25774:25774"
+    environment:
+      TZ: "Asia/Shanghai"
+EOF
+    if [[ -n "$admin_user" ]]; then
+        echo "      ADMIN_USERNAME: \"$admin_user\"" >> docker-compose.yml
+    fi
+    if [[ -n "$admin_pass" ]]; then
+        echo "      ADMIN_PASSWORD: \"$admin_pass\"" >> docker-compose.yml
+    fi
+    cat >> docker-compose.yml <<EOF
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+
+    log_info "启动容器..."
+    docker compose up -d 2>/dev/null || docker-compose up -d
+
+    log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
+    open_firewall_ports
+    mkdir -p /etc/nginx/conf.d
+
+    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
+    cat > /etc/nginx/conf.d/komari.conf <<EOF
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name $sn;
+    return 301 https://\$host:8443\$request_uri;
+}
+server {
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+    server_name $sn;
+
+    ssl_certificate $cp;
+    ssl_certificate_key $kp;
+
+    location / {
+        proxy_pass http://127.0.0.1:25774;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
+
+    echo ""
+    log_success "Komari 探针部署完成！"
+    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443${NC}"
+    echo -e "  ${YELLOW}（如未设置管理员账号密码，请使用 docker logs komari 查看系统自动生成的初始账号密码）${NC}"
+    echo -e "  ${YELLOW}（如果不慎忘记该地址，可在脚本主菜单的「服务管理」中随时找回查看）${NC}"
+    echo ""
+}
+
 # ----------------- Realm 端口转发功能模块 -----------------
 deploy_realm() {
     if [[ -f "/root/realm/realm" ]]; then
@@ -978,10 +1191,15 @@ menu_install_service() {
         echo " 18) 安装 Xray 指定版本号"
         echo " 19) 安装 Xray Beta / 预发布版"
         echo ""
+        echo -e "  ${CYAN}── Komari (轻量级服务器监控探针) ──${NC}"
+        echo " 20) 安装 Komari 最新稳定版"
+        echo " 21) 安装 Komari 指定版本号"
+        echo " 22) 安装 Komari Snapshot / 预发布版"
+        echo ""
         echo -e "  ${CYAN}── 批量执行 ──${NC}"
         echo -e " ${GREEN}100) 全部自动执行 (所有服务)${NC}"
         echo -e " ${YELLOW}101) 全部手动执行 (所有服务)${NC}"
-        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7 10 14 16 170，默认 0）${NC}"
+        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7 10 14 16 17 20，默认 0）${NC}"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
@@ -990,10 +1208,10 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160 17)
+            SVC_CHOICES=(1 4 7 10 14 160 17 20)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160)
+            SVC_CHOICES=(1 4 7 10 14 160 20)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
             read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
@@ -1136,6 +1354,9 @@ EOF
                 17) install_xray 1; [[ "$is_batch" == "false" ]] && press_enter ;;
                 18) install_xray 2; [[ "$is_batch" == "false" ]] && press_enter ;;
                 19) install_xray 3; [[ "$is_batch" == "false" ]] && press_enter ;;
+                20) install_komari 1; [[ "$is_batch" == "false" ]] && press_enter ;;
+                21) install_komari 2; [[ "$is_batch" == "false" ]] && press_enter ;;
+                22) install_komari 3; [[ "$is_batch" == "false" ]] && press_enter ;;
                 *) log_warn "未知选项或服务: $vc，跳过"; sleep 1 ;;
             esac
         done
