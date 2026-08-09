@@ -7,6 +7,14 @@
 #   - 支持已安装检测、导入旧链接、域名冲突检测、证书路径询问
 #   - 新增菜单项 20/21/22，插入在 Xray 之后、批量执行之前
 #   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm / Xray 卸载与安装逻辑均保持不变）
+#
+# ════════════════════════ 本次更新说明 (优化3：修复反代 Connection 头) ════════════════════════
+# 修复：Sub-Store 与 Komari 的 Nginx 反代配置中，Connection 请求头被写死为 "upgrade"，
+#   导致所有普通 HTTP 请求（包括登录 POST）都被当成 WebSocket 协议升级请求处理，
+#   容易造成连接被重置、登录页出现 "Network error"。
+#   现改为 proxy_set_header Connection $http_connection; 根据客户端实际请求头动态传递，
+#   普通请求走 keep-alive，WebSocket 升级请求依旧能正常工作。
+#   仅修改了这一处配置，未改动任何其他功能与安装逻辑。
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -537,6 +545,8 @@ EOF
     mkdir -p /etc/nginx/conf.d
     
     # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
+    # 【优化3修复】：Connection 头改为跟随客户端实际请求头 $http_connection，
+    # 避免所有普通 HTTP 请求被误当成 WebSocket 升级请求，导致登录等请求出现连接被重置/Network error
     cat > /etc/nginx/conf.d/substore.conf <<EOF
 server {
     listen 8080;
@@ -560,7 +570,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$http_connection;
     }
 }
 EOF
@@ -934,6 +944,8 @@ EOF
     mkdir -p /etc/nginx/conf.d
 
     # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
+    # 【优化3修复】：Connection 头改为跟随客户端实际请求头 $http_connection，
+    # 避免所有普通 HTTP 请求被误当成 WebSocket 升级请求，导致登录页出现 Network error
     cat > /etc/nginx/conf.d/komari.conf <<EOF
 server {
     listen 8080;
@@ -957,7 +969,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection \$http_connection;
     }
 }
 EOF
