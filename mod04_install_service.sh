@@ -1003,7 +1003,7 @@ deploy_realm() {
     log_step "部署 Realm 端口转发环境"
     mkdir -p /root/realm
     cd /root/realm || return 1
-    wget -O realm.tar.gz https://github.com/github19999/realm/releases/download/v2.6.0/realm-x86_64-unknown-linux-gnu.tar.gz
+    wget -O realm.tar.gz https://github.com/github19999/fork-realm/releases/download/v2.6.0/realm-x86_64-unknown-linux-gnu.tar.gz
     tar -xvf realm.tar.gz
     chmod +x realm
     cat > /etc/systemd/system/realm.service << 'EOF'
