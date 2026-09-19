@@ -62,6 +62,33 @@ open_firewall_ports() {
     fi
 }
 
+# 生成一个格式合法但无需真实可用的邮箱，用于 ZeroSSL 账户注册
+# (ZeroSSL 通过 acme.sh 的 EAB 自动完成账户绑定，签发证书不依赖邮箱能否收信)
+generate_random_email() {
+    local rand_part
+    rand_part="$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 10)"
+    [[ -z "$rand_part" ]] && rand_part="u$RANDOM$RANDOM"
+    local domains=("gmail.com" "outlook.com" "yahoo.com" "protonmail.com")
+    echo "${rand_part}$(date +%s)@${domains[$((RANDOM % ${#domains[@]}))]}"
+}
+
+# 注册/确保 ZeroSSL 账户可用；失败自动换邮箱重试
+register_zerossl_account() {
+    local email attempt=1 max_attempts=3
+    while (( attempt <= max_attempts )); do
+        email="$(generate_random_email)"
+        log_info "注册 ZeroSSL 账户 (第 ${attempt} 次尝试，邮箱: $email)..."
+        if /root/.acme.sh/acme.sh --register-account -m "$email" --server zerossl >/dev/null 2>&1; then
+            log_success "ZeroSSL 账户注册/绑定成功"
+            return 0
+        fi
+        log_warn "ZeroSSL 账户注册失败，更换邮箱重试..."
+        ((attempt++))
+    done
+    log_warn "ZeroSSL 账户多次注册均失败，签发时将由 acme.sh 自动重试注册"
+    return 1
+}
+
 deploy_ssl() {
     log_step "SSL 证书申请与安装"
 
@@ -205,8 +232,12 @@ deploy_ssl() {
     fi
 
     ln -sf /root/.acme.sh/acme.sh /usr/local/bin/acme.sh 2>/dev/null || true
-    /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-    log_success "acme.sh 已就绪"
+
+    # 改用 ZeroSSL 作为默认 CA：部分环境下 Let's Encrypt 的
+    # standalone 验证在特殊网络/风控场景下会申请失败，ZeroSSL 更稳定
+    /root/.acme.sh/acme.sh --set-default-ca --server zerossl >/dev/null 2>&1 || true
+    register_zerossl_account
+    log_success "acme.sh 已就绪 (CA: ZeroSSL)"
 
     manage_web_services_ssl "stop"
     open_firewall_ports
@@ -241,24 +272,32 @@ fi
 EOF
     chmod +x /root/.acme.sh/vpsge_hook.sh
 
-    log_step "申请证书（Standalone 模式）..."
+    log_step "申请证书（Standalone 模式, CA: ZeroSSL）..."
     local domain_args=""
     for d in "${DOMAINS[@]}"; do domain_args="$domain_args -d $d"; done
 
     echo "正在申请证书，请耐心等待..."
-    if /root/.acme.sh/acme.sh --issue $domain_args --standalone --force \
+    if /root/.acme.sh/acme.sh --issue $domain_args --standalone --server zerossl --force \
         --pre-hook "/root/.acme.sh/vpsge_hook.sh pre" \
         --post-hook "/root/.acme.sh/vpsge_hook.sh post"; then
         log_success "SSL 证书申请成功"
     else
-        log_error "SSL 证书申请失败"
-        echo -e "${YELLOW}可能的原因:${NC}"
-        echo "  • 防火墙/云服务商安全组阻止了外网对 80 端口的访问 (Timeout)"
-        echo "  • 域名未正确解析到本服务器的公网 IP"
-        echo "  • Let's Encrypt 服务暂时不可用"
-        echo -e "${PURPLE}【重要提示】如果您的 VPS (如 YXVM、Oracle 等) 存在外部控制台安全组，请务必登录控制台手动放行 80/443 端口！${NC}"
-        manage_web_services_ssl "start"
-        return 1
+        log_warn "ZeroSSL 签发失败，尝试重新注册账户后再试一次..."
+        register_zerossl_account
+        if /root/.acme.sh/acme.sh --issue $domain_args --standalone --server zerossl --force \
+            --pre-hook "/root/.acme.sh/vpsge_hook.sh pre" \
+            --post-hook "/root/.acme.sh/vpsge_hook.sh post"; then
+            log_success "SSL 证书申请成功 (重试后)"
+        else
+            log_error "SSL 证书申请失败"
+            echo -e "${YELLOW}可能的原因:${NC}"
+            echo "  • 防火墙/云服务商安全组阻止了外网对 80 端口的访问 (Timeout)"
+            echo "  • 域名未正确解析到本服务器的公网 IP"
+            echo "  • ZeroSSL 服务暂时不可用"
+            echo -e "${PURPLE}【重要提示】如果您的 VPS (如 YXVM、Oracle 等) 存在外部控制台安全组，请务必登录控制台手动放行 80/443 端口！${NC}"
+            manage_web_services_ssl "start"
+            return 1
+        fi
     fi
 
     log_step "安装SSL证书到指定目录..."
