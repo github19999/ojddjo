@@ -62,7 +62,7 @@ open_firewall_ports() {
     fi
 }
 
-# 生成一个格式合法但无需真实可用的邮箱，用于 ZeroSSL 账户注册
+# 生成一个格式合法但无需真实可用的邮箱，仅用于 ZeroSSL 账户注册
 # (ZeroSSL 通过 acme.sh 的 EAB 自动完成账户绑定，签发证书不依赖邮箱能否收信)
 generate_random_email() {
     local rand_part
@@ -85,8 +85,22 @@ register_zerossl_account() {
         log_warn "ZeroSSL 账户注册失败，更换邮箱重试..."
         ((attempt++))
     done
-    log_warn "ZeroSSL 账户多次注册均失败，签发时将由 acme.sh 自动重试注册"
+    log_warn "ZeroSSL 账户多次注册均失败"
     return 1
+}
+
+# 用指定 CA 尝试签发证书，成功返回 0，失败返回 1
+# 参数: $1=CA server标识 (letsencrypt/zerossl)  $2=domain_args  $3=main_domain
+try_issue_cert() {
+    local ca="$1" domain_args="$2"
+
+    if [[ "$ca" == "zerossl" ]]; then
+        register_zerossl_account || true
+    fi
+
+    /root/.acme.sh/acme.sh --issue $domain_args --standalone --server "$ca" --force \
+        --pre-hook "/root/.acme.sh/vpsge_hook.sh pre" \
+        --post-hook "/root/.acme.sh/vpsge_hook.sh post"
 }
 
 deploy_ssl() {
@@ -165,6 +179,22 @@ deploy_ssl() {
     done
 
     echo ""
+    echo -e "${CYAN}请选择证书颁发机构 (CA):${NC}"
+    echo "  1) Let's Encrypt [默认，若失败自动改用 ZeroSSL]"
+    echo "  2) ZeroSSL [若失败自动改用 Let's Encrypt]"
+    echo ""
+    local ca_choice PRIMARY_CA FALLBACK_CA
+    read -rp "请选择 (1-2) [默认 1]: " ca_choice
+    ca_choice=${ca_choice:-1}
+    if [[ "$ca_choice" == "2" ]]; then
+        PRIMARY_CA="zerossl"
+        FALLBACK_CA="letsencrypt"
+    else
+        PRIMARY_CA="letsencrypt"
+        FALLBACK_CA="zerossl"
+    fi
+
+    echo ""
     echo -e "${CYAN}请选择证书安装位置:${NC}"
     echo "  1) 标准路径 (/etc/ssl/private/) [默认]"
     echo "  2) Nginx专用 (/etc/nginx/ssl/)"
@@ -232,12 +262,8 @@ deploy_ssl() {
     fi
 
     ln -sf /root/.acme.sh/acme.sh /usr/local/bin/acme.sh 2>/dev/null || true
-
-    # 改用 ZeroSSL 作为默认 CA：部分环境下 Let's Encrypt 的
-    # standalone 验证在特殊网络/风控场景下会申请失败，ZeroSSL 更稳定
-    /root/.acme.sh/acme.sh --set-default-ca --server zerossl >/dev/null 2>&1 || true
-    register_zerossl_account
-    log_success "acme.sh 已就绪 (CA: ZeroSSL)"
+    /root/.acme.sh/acme.sh --set-default-ca --server "$PRIMARY_CA" >/dev/null 2>&1 || true
+    log_success "acme.sh 已就绪 (首选 CA: $PRIMARY_CA, 备用 CA: $FALLBACK_CA)"
 
     manage_web_services_ssl "stop"
     open_firewall_ports
@@ -272,28 +298,26 @@ fi
 EOF
     chmod +x /root/.acme.sh/vpsge_hook.sh
 
-    log_step "申请证书（Standalone 模式, CA: ZeroSSL）..."
     local domain_args=""
     for d in "${DOMAINS[@]}"; do domain_args="$domain_args -d $d"; done
 
+    local ISSUED_CA=""
+    log_step "申请证书（Standalone 模式, 首选 CA: $PRIMARY_CA）..."
     echo "正在申请证书，请耐心等待..."
-    if /root/.acme.sh/acme.sh --issue $domain_args --standalone --server zerossl --force \
-        --pre-hook "/root/.acme.sh/vpsge_hook.sh pre" \
-        --post-hook "/root/.acme.sh/vpsge_hook.sh post"; then
-        log_success "SSL 证书申请成功"
+    if try_issue_cert "$PRIMARY_CA" "$domain_args"; then
+        log_success "SSL 证书申请成功 (CA: $PRIMARY_CA)"
+        ISSUED_CA="$PRIMARY_CA"
     else
-        log_warn "ZeroSSL 签发失败，尝试重新注册账户后再试一次..."
-        register_zerossl_account
-        if /root/.acme.sh/acme.sh --issue $domain_args --standalone --server zerossl --force \
-            --pre-hook "/root/.acme.sh/vpsge_hook.sh pre" \
-            --post-hook "/root/.acme.sh/vpsge_hook.sh post"; then
-            log_success "SSL 证书申请成功 (重试后)"
+        log_warn "$PRIMARY_CA 签发失败，自动切换备用 CA: $FALLBACK_CA 重试..."
+        if try_issue_cert "$FALLBACK_CA" "$domain_args"; then
+            log_success "SSL 证书申请成功 (CA: $FALLBACK_CA，备用方案)"
+            ISSUED_CA="$FALLBACK_CA"
         else
-            log_error "SSL 证书申请失败"
+            log_error "SSL 证书申请失败（$PRIMARY_CA 与 $FALLBACK_CA 均已尝试）"
             echo -e "${YELLOW}可能的原因:${NC}"
             echo "  • 防火墙/云服务商安全组阻止了外网对 80 端口的访问 (Timeout)"
             echo "  • 域名未正确解析到本服务器的公网 IP"
-            echo "  • ZeroSSL 服务暂时不可用"
+            echo "  • CA 服务暂时不可用或触发速率限制"
             echo -e "${PURPLE}【重要提示】如果您的 VPS (如 YXVM、Oracle 等) 存在外部控制台安全组，请务必登录控制台手动放行 80/443 端口！${NC}"
             manage_web_services_ssl "start"
             return 1
@@ -344,6 +368,7 @@ EOF
     echo -e "${GREEN}证书信息:${NC}"
     echo "  主域名: $MAIN_DOMAIN"
     echo "  所有域名: ${DOMAINS[*]}"
+    echo "  签发 CA: $ISSUED_CA"
     echo "  证书目录: $CERT_DIR"
     echo "  私钥文件: $KEY_FILE"
     echo "  证书文件: $CERT_FILE"
