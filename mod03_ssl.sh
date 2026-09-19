@@ -62,23 +62,39 @@ open_firewall_ports() {
     fi
 }
 
-# 生成一个格式合法但无需真实可用的邮箱，仅用于 ZeroSSL 账户注册
-# (ZeroSSL 通过 acme.sh 的 EAB 自动完成账户绑定，签发证书不依赖邮箱能否收信)
+# 生成一个格式合法但无需真实可用的超长随机 Gmail 地址，仅用于 ZeroSSL 账户注册
+# (ZeroSSL 通过 acme.sh 的 EAB 自动完成账户绑定，签发证书不依赖邮箱能否收信；
+#  用更长的本地部分降低与他人邮箱重复/被判定为规律性小号的概率)
 generate_random_email() {
     local rand_part
-    rand_part="$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 10)"
-    [[ -z "$rand_part" ]] && rand_part="u$RANDOM$RANDOM"
-    local domains=("gmail.com" "outlook.com" "yahoo.com" "protonmail.com")
-    echo "${rand_part}$(date +%s)@${domains[$((RANDOM % ${#domains[@]}))]}"
+    rand_part="$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 28)"
+    [[ -z "$rand_part" || ${#rand_part} -lt 20 ]] && rand_part="u${RANDOM}${RANDOM}${RANDOM}${RANDOM}x$(date +%s%N | tr -dc '0-9' | head -c 12)"
+    echo "${rand_part}@gmail.com"
 }
 
-# 注册/确保 ZeroSSL 账户可用；失败自动换邮箱重试
+# 注册/确保 ZeroSSL 账户可用；同一台机器只注册一次并持久化邮箱，
+# 避免每次都用全新邮箱注册——频繁"新建账户"会被 ZeroSSL 风控判定为异常，
+# 进而触发 retryafter 极大(如86400秒/24小时)的限流
+ZEROSSL_EMAIL_FILE="/root/.acme.sh/.vpsge_zerossl_email"
 register_zerossl_account() {
+    if [[ -f "$ZEROSSL_EMAIL_FILE" ]]; then
+        local cached_email
+        cached_email="$(cat "$ZEROSSL_EMAIL_FILE" 2>/dev/null)"
+        if [[ -n "$cached_email" ]]; then
+            log_info "复用已注册的 ZeroSSL 账户 ($cached_email)..."
+            if /root/.acme.sh/acme.sh --register-account -m "$cached_email" --server zerossl >/dev/null 2>&1; then
+                return 0
+            fi
+            log_warn "复用账户注册失败，改为生成新邮箱..."
+        fi
+    fi
+
     local email attempt=1 max_attempts=3
     while (( attempt <= max_attempts )); do
         email="$(generate_random_email)"
         log_info "注册 ZeroSSL 账户 (第 ${attempt} 次尝试，邮箱: $email)..."
         if /root/.acme.sh/acme.sh --register-account -m "$email" --server zerossl >/dev/null 2>&1; then
+            echo "$email" > "$ZEROSSL_EMAIL_FILE"
             log_success "ZeroSSL 账户注册/绑定成功"
             return 0
         fi
@@ -89,18 +105,44 @@ register_zerossl_account() {
     return 1
 }
 
+# 探测指定 CA 的 ACME 接口连通性/延迟，超时或不可达返回 1
+# 用于提前发现"这个 CA 从本机网络访问很慢"，避免白等一轮内部重试
+check_ca_reachable() {
+    local ca="$1" url max_wait=5
+    case "$ca" in
+        letsencrypt) url="https://acme-v02.api.letsencrypt.org/directory" ;;
+        zerossl)     url="https://acme.zerossl.com/v2/DV90" ;;
+        *) return 0 ;;
+    esac
+    curl -s -o /dev/null --connect-timeout "$max_wait" --max-time "$max_wait" "$url"
+}
+
 # 用指定 CA 尝试签发证书，成功返回 0，失败返回 1
-# 参数: $1=CA server标识 (letsencrypt/zerossl)  $2=domain_args  $3=main_domain
+# 参数: $1=CA server标识 (letsencrypt/zerossl)  $2=domain_args
+# 整体设置超时，避免 CA 端偶发抖动/502 时被 acme.sh 内部重试拖到没有尽头；
+# 但超时时长按域名数量动态放大——多域名逐个 http-01 验证 + 签发 + 轮询
+# 本身就需要更长时间（实测4个域名全程约6分钟属正常），避免误杀本可成功的请求
 try_issue_cert() {
     local ca="$1" domain_args="$2"
+    local domain_count
+    domain_count=$(grep -o '\-d ' <<< "$domain_args" | wc -l)
+    (( domain_count < 1 )) && domain_count=1
+    local issue_timeout=$(( 180 + domain_count * 120 ))
+    (( issue_timeout > 900 )) && issue_timeout=900
 
     if [[ "$ca" == "zerossl" ]]; then
         register_zerossl_account || true
     fi
 
-    /root/.acme.sh/acme.sh --issue $domain_args --standalone --server "$ca" --force \
+    log_info "本次签发超时上限: ${issue_timeout}s（按 ${domain_count} 个域名动态计算）"
+    timeout "$issue_timeout" /root/.acme.sh/acme.sh --issue $domain_args --standalone --server "$ca" --force \
         --pre-hook "/root/.acme.sh/vpsge_hook.sh pre" \
         --post-hook "/root/.acme.sh/vpsge_hook.sh post"
+    local rc=$?
+    if [[ $rc -eq 124 ]]; then
+        log_warn "$ca 签发超时 (${issue_timeout}s 内未完成)，判定为该 CA 当前响应过慢"
+    fi
+    return $rc
 }
 
 deploy_ssl() {
@@ -302,13 +344,28 @@ EOF
     for d in "${DOMAINS[@]}"; do domain_args="$domain_args -d $d"; done
 
     local ISSUED_CA=""
+
+    log_info "预检 $PRIMARY_CA 接口连通性/延迟..."
+    if ! check_ca_reachable "$PRIMARY_CA"; then
+        log_warn "$PRIMARY_CA 当前访问较慢或不可达，直接改用备用 CA: $FALLBACK_CA"
+        local tmp="$PRIMARY_CA"; PRIMARY_CA="$FALLBACK_CA"; FALLBACK_CA="$tmp"
+    fi
+
     log_step "申请证书（Standalone 模式, 首选 CA: $PRIMARY_CA）..."
-    echo "正在申请证书，请耐心等待..."
+    echo "正在申请证书，域名越多耐心等待时间越长，请勿中途关闭窗口..."
     if try_issue_cert "$PRIMARY_CA" "$domain_args"; then
         log_success "SSL 证书申请成功 (CA: $PRIMARY_CA)"
         ISSUED_CA="$PRIMARY_CA"
     else
-        log_warn "$PRIMARY_CA 签发失败，自动切换备用 CA: $FALLBACK_CA 重试..."
+        log_warn "$PRIMARY_CA 签发失败，准备切换备用 CA: $FALLBACK_CA 重试..."
+        if ! check_ca_reachable "$FALLBACK_CA"; then
+            log_error "备用 CA ($FALLBACK_CA) 当前网络也不可达，放弃重试，避免长时间空等"
+            echo -e "${YELLOW}可能的原因:${NC}"
+            echo "  • 本机到 $FALLBACK_CA 的出网连接被防火墙/运营商/云安全组阻断"
+            echo "  • 可尝试手动执行: curl -v https://acme-v02.api.letsencrypt.org/directory 排查"
+            manage_web_services_ssl "start"
+            return 1
+        fi
         if try_issue_cert "$FALLBACK_CA" "$domain_args"; then
             log_success "SSL 证书申请成功 (CA: $FALLBACK_CA，备用方案)"
             ISSUED_CA="$FALLBACK_CA"
