@@ -6,7 +6,12 @@
 #   - 部署方式与 Wallos / Sub-Store 完全一致：Docker 部署 + Nginx 反代到独立 8443 端口
 #   - 支持已安装检测、导入旧链接、域名冲突检测、证书路径询问
 #   - 新增菜单项 20/21/22，插入在 Xray 之后、批量执行之前
-#   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm / Xray 卸载与安装逻辑均保持不变）
+#
+# ════════════════════════ 本次更新说明 (优化5：修复服务启动检查) ════════════════════════
+# 修复：Realm systemd 单元移除与 /root/realm 冲突的 DynamicUser，部署后启用并确认服务状态；
+#   下载或启动失败时返回错误，并提供 systemd 日志排查提示。支持 x86_64 和 aarch64。
+# 加固：Docker 服务先确认守护进程与 Compose 可用，容器启动失败时停止后续配置并输出日志提示。
+# 菜单：在 Sub-Store、Wallos、Komari 项后标注需要 Docker，在 Realm 项标注无需 Docker。
 #
 # ════════════════════════ 本次更新说明 (优化3：修复反代 Connection 头) ════════════════════════
 # 修复：Sub-Store 与 Komari 的 Nginx 反代配置中，Connection 请求头被写死为 "upgrade"，
@@ -24,7 +29,7 @@
 #   判定请求来源不可信，直接返回 403 拒绝——包括登录接口在内，导致登录页出现 "Network error"。
 #   现统一改为 proxy_set_header Host $http_host; 完整保留客户端实际发送的 Host:端口，
 #   从根本上解决该类反代场景下的来源校验误判问题。
-#   本次仅修改了这三处配置中的 Host 请求头，未改动任何其他功能与安装逻辑。
+#   优化4阶段仅修改了这三处配置中的 Host 请求头。
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -192,51 +197,77 @@ HTML
     # 【核心修复】清理系统自带的 Nginx 默认站点配置，确保 80/8080 端口完全释放，不与其他面板产生底层冲突
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
     
-    systemctl enable nginx >/dev/null 2>&1 || true
-    systemctl start nginx >/dev/null 2>&1 || true
-    systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败"
+    if ! nginx -t >/dev/null 2>&1; then
+        log_error "Nginx 配置检查失败；请运行 nginx -t 查看详情"
+        return 1
+    fi
+    if ! systemctl enable nginx >/dev/null 2>&1 || ! systemctl restart nginx >/dev/null 2>&1 || ! systemctl is-active --quiet nginx; then
+        log_error "Nginx 未能启动；请运行 systemctl status nginx 和 journalctl -u nginx -n 50 查看原因"
+        return 1
+    fi
+    log_success "Nginx 安装并启动成功"
 }
 
 install_docker_env() {
     local mode="${1:-1}"
+    local installer
     log_step "检查并配置 Docker 环境..."
     
     if ! is_cmd_exist docker; then
         log_info "正在安装 Docker..."
-        
+
         if [[ "$mode" == "3" ]]; then
-            curl -fsSL https://test.docker.com -o get-docker.sh
+            installer="https://test.docker.com"
         else
-            curl -fsSL https://get.docker.com -o get-docker.sh
+            installer="https://get.docker.com"
         fi
-        
+
+        if ! curl -fsSL "$installer" -o /tmp/get-docker.sh; then
+            log_error "Docker 安装脚本下载失败"
+            return 1
+        fi
         if [[ "$mode" == "2" ]]; then
             read -rp "请输入 Docker 版本号 (回车跳过使用默认): " d_ver
             if [[ -n "$d_ver" ]]; then
-                VERSION="$d_ver" sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+                VERSION="$d_ver" sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
             else
-                sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+                sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
             fi
         else
-            sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+            sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
         fi
-        rm -f get-docker.sh
+        rm -f /tmp/get-docker.sh
     else
         if ! prompt_reinstall "Docker 环境"; then
             systemctl enable docker >/dev/null 2>&1 || true
             systemctl start docker >/dev/null 2>&1 || true
-            return 0
         fi
     fi
     systemctl enable docker >/dev/null 2>&1 || true
     systemctl start docker >/dev/null 2>&1 || true
 
+    if ! docker info >/dev/null 2>&1; then
+        log_error "Docker 命令可用，但 Docker 守护进程未运行；请检查 systemctl status docker"
+        return 1
+    fi
+
     if ! docker compose version >/dev/null 2>&1; then
         log_info "正在安装 Docker Compose 插件..."
-        if [[ "$PKG_MANAGER" == "apt" ]]; then apt update -y && apt install -y docker-compose-plugin
-        else $PKG_MANAGER install -y docker-compose-plugin; fi
+        if [[ "$PKG_MANAGER" == "apt" ]]; then
+            apt update -y && apt install -y docker-compose-plugin || { log_error "Docker Compose 插件安装失败"; return 1; }
+        elif [[ -n "$PKG_MANAGER" ]]; then
+            $PKG_MANAGER install -y docker-compose-plugin || { log_error "Docker Compose 插件安装失败"; return 1; }
+        else
+            log_error "未识别包管理器，无法安装 Docker Compose 插件"
+            return 1
+        fi
     else
         log_success "Docker Compose 已就绪"
+    fi
+
+    if ! docker compose version >/dev/null 2>&1; then
+        log_error "Docker Compose 不可用"
+        return 1
     fi
 }
 
@@ -417,11 +448,11 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         fi
     fi
 
-    install_docker_env 1
+    install_docker_env 1 || return 1
     
     if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1
+        install_nginx 1 || return 1
     fi
 
     if ! is_cmd_exist unzip; then
@@ -548,7 +579,7 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose up -d 2>/dev/null || docker-compose up -d
+    docker compose up -d || { log_error "Sub-Store 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -661,11 +692,11 @@ ${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
         wallos_ver="beta"
     fi
 
-    install_docker_env 1
+    install_docker_env 1 || return 1
     
     if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1
+        install_nginx 1 || return 1
     fi
 
     log_step "部署 Wallos (订阅管理与财务系统) - 版本: $wallos_ver"
@@ -738,7 +769,7 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose up -d 2>/dev/null || docker-compose up -d
+    docker compose up -d || { log_error "Wallos 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -851,11 +882,11 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
         fi
     fi
 
-    install_docker_env 1
+    install_docker_env 1 || return 1
 
     if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1
+        install_nginx 1 || return 1
     fi
 
     log_step "部署 Komari (轻量级服务器监控探针) - 镜像版本: $komari_tag"
@@ -947,7 +978,7 @@ EOF
 EOF
 
     log_info "启动容器..."
-    docker compose up -d 2>/dev/null || docker-compose up -d
+    docker compose up -d || { log_error "Komari 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -995,41 +1026,71 @@ EOF
 
 # ----------------- Realm 端口转发功能模块 -----------------
 deploy_realm() {
-    if [[ -f "/root/realm/realm" ]]; then
+    local arch asset_url
+    case "$(uname -m)" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) log_error "当前架构 $(uname -m) 暂不支持 Realm"; return 1 ;;
+    esac
+
+    if [[ -x "/root/realm/realm" ]]; then
         if ! prompt_reinstall "Realm"; then return 0; fi
         systemctl stop realm 2>/dev/null || true
     fi
 
     log_step "部署 Realm 端口转发环境"
-    mkdir -p /root/realm
-    cd /root/realm || return 1
-    wget -O realm.tar.gz https://github.com/github19999/fork-realm/releases/download/v2.6.0/realm-x86_64-unknown-linux-gnu.tar.gz
-    tar -xvf realm.tar.gz
-    chmod +x realm
+    mkdir -p /root/realm || { log_error "无法创建 /root/realm"; return 1; }
+    asset_url="https://github.com/github19999/fork-realm/releases/download/v2.6.0/realm-${arch}-unknown-linux-gnu.tar.gz"
+    if ! curl -fL --retry 3 --connect-timeout 15 "$asset_url" -o /tmp/realm.tar.gz; then
+        log_error "Realm 下载失败，请检查网络或该架构的 Release 资源"
+        return 1
+    fi
+    if ! tar -xzf /tmp/realm.tar.gz -C /root/realm realm; then
+        rm -f /tmp/realm.tar.gz
+        log_error "Realm 安装包解压失败"
+        return 1
+    fi
+    rm -f /tmp/realm.tar.gz
+    chmod 755 /root/realm/realm || { log_error "设置 Realm 执行权限失败"; return 1; }
+    if [[ ! -f /root/realm/config.toml ]]; then
+        install -m 600 /dev/null /root/realm/config.toml
+    fi
     cat > /etc/systemd/system/realm.service << 'EOF'
 [Unit]
-Description=realm
+Description=Realm port forwarder
 After=network-online.target
-Wants=network-online.target systemd-networkd-wait-online.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
-DynamicUser=true
 WorkingDirectory=/root/realm
 ExecStart=/root/realm/realm -c /root/realm/config.toml
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    touch /root/realm/config.toml
-    systemctl daemon-reload
-    log_success "Realm 部署完成。"
+    systemctl daemon-reload || { log_error "systemd 配置重载失败"; return 1; }
+    if ! systemctl enable --now realm.service; then
+        log_error "Realm 服务启动失败；请运行 systemctl status realm 和 journalctl -u realm -n 50 查看原因"
+        return 1
+    fi
+    if ! systemctl is-active --quiet realm.service; then
+        log_error "Realm 服务未进入运行状态；请运行 journalctl -u realm -n 50 查看原因"
+        return 1
+    fi
+    log_success "Realm 已安装并启动，且已设置为开机自启。"
 }
 
 add_forward_realm() {
+    if [[ ! -x "/root/realm/realm" ]]; then
+        log_error "请先安装 Realm"
+        return 1
+    fi
     log_step "添加 Realm 转发规则"
     if [ ! -f "/root/realm/config.toml" ]; then
         touch /root/realm/config.toml
@@ -1046,8 +1107,12 @@ add_forward_realm() {
             break
         fi
     done
-    systemctl restart realm 2>/dev/null || true
-    log_success "转发规则已添加并生效。"
+    if systemctl restart realm.service; then
+        log_success "转发规则已添加并生效。"
+    else
+        log_error "Realm 重启失败；请运行 journalctl -u realm -n 50 查看原因"
+        return 1
+    fi
 }
 
 delete_forward_realm() {
@@ -1096,15 +1161,23 @@ delete_forward_realm() {
     sed -i "${start_line},${end_line}d" /root/realm/config.toml
 
     log_success "转发规则已删除。"
-    systemctl restart realm 2>/dev/null || true
+    if ! systemctl restart realm.service; then
+        log_error "规则已从配置中删除，但 Realm 重启失败；请检查 journalctl -u realm -n 50"
+        return 1
+    fi
+    log_success "转发规则已删除并生效。"
 }
 
 start_service_realm() {
-    systemctl unmask realm.service 2>/dev/null || true
-    systemctl daemon-reload 2>/dev/null || true
-    systemctl restart realm.service 2>/dev/null || true
-    systemctl enable realm.service 2>/dev/null || true
-    log_success "realm 服务已启动并设置为开机自启。"
+    if [[ ! -x "/root/realm/realm" || ! -f /etc/systemd/system/realm.service ]]; then
+        log_error "Realm 未完整安装，请重新部署"
+        return 1
+    fi
+    if ! systemctl daemon-reload || ! systemctl enable --now realm.service || ! systemctl is-active --quiet realm.service; then
+        log_error "Realm 启动失败；请运行 systemctl status realm 和 journalctl -u realm -n 50 查看原因"
+        return 1
+    fi
+    log_success "Realm 服务已启动并设置为开机自启。"
 }
 
 stop_service_realm() {
@@ -1196,17 +1269,17 @@ menu_install_service() {
         echo "  9) 安装 Docker Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Sub-Store (订阅转换中心) ──${NC}"
-        echo " 10) 安装 Sub-Store 最新稳定版"
-        echo " 11) 安装 Sub-Store 指定版本号"
-        echo " 12) 安装 Sub-Store / 预发布版"
+        echo " 10) 安装 Sub-Store 最新稳定版 [需要 Docker]"
+        echo " 11) 安装 Sub-Store 指定版本号 [需要 Docker]"
+        echo " 12) 安装 Sub-Store / 预发布版 [需要 Docker]"
         echo ""
         echo -e "  ${CYAN}── Wallos (个人财务与订阅追踪) ──${NC}"
-        echo " 13) 安装 Wallos 最新稳定版"
-        echo " 14) 安装 Wallos 指定版本号 (默认: 2.36.2，回车确认)"
-        echo " 15) 安装 Wallos Beta / 预发布版"
+        echo " 13) 安装 Wallos 最新稳定版 [需要 Docker]"
+        echo " 14) 安装 Wallos 指定版本号 (默认: 2.36.2，回车确认) [需要 Docker]"
+        echo " 15) 安装 Wallos Beta / 预发布版 [需要 Docker]"
         echo ""
         echo -e "  ${CYAN}── Realm (端口转发工具) ──${NC}"
-        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载)"
+        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载；无需 Docker)"
         echo ""
         echo -e "  ${CYAN}── 核心代理 (Xray) ──${NC}"
         echo " 17) 安装 Xray 最新稳定版"
@@ -1214,9 +1287,9 @@ menu_install_service() {
         echo " 19) 安装 Xray Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Komari (轻量级服务器监控探针) ──${NC}"
-        echo " 20) 安装 Komari 最新稳定版"
-        echo " 21) 安装 Komari 指定版本号"
-        echo " 22) 安装 Komari Snapshot / 预发布版"
+        echo " 20) 安装 Komari 最新稳定版 [需要 Docker]"
+        echo " 21) 安装 Komari 指定版本号 [需要 Docker]"
+        echo " 22) 安装 Komari Snapshot / 预发布版 [需要 Docker]"
         echo ""
         echo -e "  ${CYAN}── 批量执行 ──${NC}"
         echo -e " ${GREEN}100) 全部自动执行 (所有服务)${NC}"
