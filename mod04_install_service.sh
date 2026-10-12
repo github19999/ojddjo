@@ -1,37 +1,208 @@
 #!/bin/bash
 # ── mod04_install_service.sh ── 由 vpsge.sh 通过 source 加载，请勿单独执行 ──
 #
-# ════════════════════════ 本次更新说明 (优化2) ════════════════════════
-# 新增：Komari 探针监控面板的安装支持（最新稳定版 / 指定版本号 / 预发布Snapshot版）
-#   - 部署方式与 Wallos / Sub-Store 完全一致：Docker 部署 + Nginx 反代到独立 8443 端口
-#   - 支持已安装检测、导入旧链接、域名冲突检测、证书路径询问
-#   - 新增菜单项 20/21/22，插入在 Xray 之后、批量执行之前
+# ════════════════════════ 服务依赖一览 ════════════════════════
+#   服务              需要 Docker    需要 Nginx    说明
+#   ─────────────────────────────────────────────────────────
+#   sing-box              ✗              ✗         二进制 + systemd
+#   Xray                  ✗              ✗         二进制 + systemd
+#   Nginx                 ✗              —         系统包
+#   Docker 环境           —              ✗         get.docker.com
+#   Realm                 ✗              ✗         二进制 + systemd（需先添加转发规则才能启动）
+#   Sub-Store             ✔              ✔         Docker 部署 + Nginx 8443 反代
+#   Wallos                ✔              ✔         Docker 部署 + Nginx 8443 反代
+#   Komari                ✔              ✔         Docker 部署 + Nginx 8443 反代
+#   标 ✔ 的服务在缺少依赖时会自动安装；依赖安装失败会直接中止，不再带病继续。
 #
-# ════════════════════════ 本次更新说明 (优化5：修复服务启动检查) ════════════════════════
-# 修复：Realm systemd 单元移除与 /root/realm 冲突的 DynamicUser，部署后启用并确认服务状态；
-#   下载或启动失败时返回错误，并提供 systemd 日志排查提示。支持 x86_64 和 aarch64。
-# 加固：Docker 服务先确认守护进程与 Compose 可用，容器启动失败时停止后续配置并输出日志提示。
-# 菜单：在 Sub-Store、Wallos、Komari 项后标注需要 Docker，在 Realm 项标注无需 Docker。
+# ════════════════════════ 历史更新说明 ════════════════════════
+# 优化2：新增 Komari 探针（菜单 20/21/22）。
+# 优化3：Sub-Store / Komari 反代 Connection 头改为 $http_connection。
+# 优化4：Sub-Store / Wallos / Komari 反代 Host 头改为 $http_host（保留端口号）。
 #
-# ════════════════════════ 本次更新说明 (优化3：修复反代 Connection 头) ════════════════════════
-# 修复：Sub-Store 与 Komari 的 Nginx 反代配置中，Connection 请求头被写死为 "upgrade"，
-#   导致所有普通 HTTP 请求（包括登录 POST）都被当成 WebSocket 协议升级请求处理，
-#   容易造成连接被重置、登录页出现 "Network error"。
-#   现改为 proxy_set_header Connection $http_connection; 根据客户端实际请求头动态传递，
-#   普通请求走 keep-alive，WebSocket 升级请求依旧能正常工作。
-#
-# ════════════════════════ 本次更新说明 (优化4：修复反代 Host 头丢失端口号) ════════════════════════
-# 修复：Sub-Store / Wallos / Komari 的 Nginx 反代配置中，均使用 proxy_set_header Host $host;
-#   而 Nginx 的 $host 变量【永远不带端口号】。由于三者都统一部署在 8443 端口，
-#   浏览器发出的 Origin 请求头是 https://域名:8443（带端口），
-#   但后端收到的 Host 请求头却是 域名（不带端口），两者不一致。
-#   部分应用（例如 Komari，其内置 cors_origin_check_enabled 默认开启）会用这种不一致
-#   判定请求来源不可信，直接返回 403 拒绝——包括登录接口在内，导致登录页出现 "Network error"。
-#   现统一改为 proxy_set_header Host $http_host; 完整保留客户端实际发送的 Host:端口，
-#   从根本上解决该类反代场景下的来源校验误判问题。
-#   优化4阶段仅修改了这三处配置中的 Host 请求头。
+# ════════════════════════ 本次更新说明 (优化5：服务启动可靠性) ════════════════════════
+# 1) 【Realm 无法启动的根因】
+#    a. service 中 DynamicUser=true 与 User=root 冲突：systemd 会用临时低权限用户 + ProtectHome 运行，
+#       无法访问 /root/realm/ 下的二进制 → 203/EXEC 启动失败。已移除 DynamicUser。
+#    b. 部署后 config.toml 是空文件，realm 没有任何 endpoints 会直接退出。
+#       现在：没有转发规则时拒绝启动并给出提示；添加规则后自动 enable + start。
+#    c. 增加架构识别、下载校验、二进制可执行性自检（--version），失败立即报错。
+#    d. 新增转发规则时校验端口/目标，并检测本机端口占用；删光规则后自动停止服务。
+# 2) 【sing-box 同类问题】指定版本安装的二进制在 /usr/local/bin，而 service 写死 /usr/bin/sing-box，
+#    导致启动失败。现在按 command -v 实际路径生成/修正 ExecStart。
+# 3) 【Docker 类服务】统一 ensure_docker_ready / ensure_nginx_ready：
+#    依赖不可用就中止；compose 启动后检查容器真的在运行，失败自动打印日志；
+#    部署前检测本地端口占用；不再吞掉 docker compose 的报错。
+# 4) 【Nginx 保护】写入反代配置后先 nginx -t，失败则把该配置改名为 .disabled，
+#    避免一个缺失的证书拖垮 Nginx 及其他面板。
+# 5) 三个面板的 Nginx 配置、Docker 依赖检查抽成公共函数，减少重复代码。
+# 6) 菜单中标注哪些服务需要 Docker。
 # ════════════════════════════════════════════════════════════════════
 
+
+# ────────────────────────────────────────────────────────────────
+#  公共辅助函数
+# ────────────────────────────────────────────────────────────────
+
+# 本机是否有监听该端口（ss 不存在时视为未占用）
+port_in_use() {
+    is_cmd_exist ss || return 1
+    ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"
+}
+
+ensure_unzip() {
+    is_cmd_exist unzip && return 0
+    log_info "正在为您自动安装必要的 unzip 解压工具..."
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        apt update -y >/dev/null 2>&1 || true
+        apt install -y unzip >/dev/null 2>&1 || true
+    else
+        $PKG_MANAGER install -y unzip >/dev/null 2>&1 || true
+    fi
+    is_cmd_exist unzip || { log_error "unzip 安装失败"; return 1; }
+}
+
+# 确保 Docker 守护进程可用 + compose 可用；不可用则返回 1（调用方必须中止）
+ensure_docker_ready() {
+    if ! is_cmd_exist docker; then
+        log_warn "未检测到 Docker，正在自动安装（该服务依赖 Docker）..."
+        install_docker_env 1 || { log_error "Docker 安装失败，已中止"; return 1; }
+    fi
+
+    if ! docker info >/dev/null 2>&1; then
+        systemctl enable docker >/dev/null 2>&1 || true
+        systemctl start docker >/dev/null 2>&1 || true
+        sleep 2
+        if ! docker info >/dev/null 2>&1; then
+            log_error "Docker 守护进程无法运行，请执行 journalctl -u docker -n 30 查看原因"
+            return 1
+        fi
+    fi
+
+    if ! docker compose version >/dev/null 2>&1 && ! is_cmd_exist docker-compose; then
+        log_info "正在安装 Docker Compose 插件..."
+        if [[ "$PKG_MANAGER" == "apt" ]]; then
+            apt update -y >/dev/null 2>&1 || true
+            apt install -y docker-compose-plugin >/dev/null 2>&1 || true
+        else
+            $PKG_MANAGER install -y docker-compose-plugin >/dev/null 2>&1 || true
+        fi
+        if ! docker compose version >/dev/null 2>&1 && ! is_cmd_exist docker-compose; then
+            log_error "Docker Compose 不可用，已中止"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# 确保 Nginx 已安装且在运行
+ensure_nginx_ready() {
+    if ! is_cmd_exist nginx; then
+        log_warn "未检测到 Nginx，正在尝试自动预装..."
+        install_nginx 1
+        is_cmd_exist nginx || { log_error "Nginx 安装失败，已中止"; return 1; }
+    fi
+    if ! systemctl is-active --quiet nginx 2>/dev/null; then
+        systemctl enable nginx >/dev/null 2>&1 || true
+        systemctl start nginx >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# docker compose up -d（保留报错输出）
+compose_up() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose up -d
+    elif is_cmd_exist docker-compose; then
+        docker-compose up -d
+    else
+        log_error "未找到 docker compose / docker-compose"
+        return 1
+    fi
+}
+
+# 等待容器进入运行状态，失败时打印最近日志
+wait_container_running() {
+    local name="$1" i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]]; then
+            # 再确认没有马上崩溃重启
+            sleep 2
+            [[ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" == "true" ]] && return 0
+            break
+        fi
+        sleep 1
+    done
+    log_error "容器 $name 未能正常运行，最近日志如下："
+    docker logs --tail 20 "$name" 2>&1 || true
+    return 1
+}
+
+# YAML 双引号字符串转义（同时转义 compose 的 $ 插值）
+yaml_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//\$/\$\$}
+    printf '%s' "$s"
+}
+
+# 生成面板的 Nginx 反代配置（8443 ssl）
+# 参数: 名称 域名 证书 私钥 后端端口 [是否支持WebSocket true/false]
+write_panel_nginx_conf() {
+    local name="$1" sn="$2" cp="$3" kp="$4" port="$5" ws="${6:-false}"
+    local ws_block=""
+    if [[ "$ws" == "true" ]]; then
+        ws_block='        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $http_connection;'
+    fi
+    mkdir -p /etc/nginx/conf.d
+    # 说明：已移除 Nginx 1.27+ 废弃的 http2 参数；Host 使用 $http_host 保留端口号
+    cat > "/etc/nginx/conf.d/${name}.conf" <<EOF
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name $sn;
+    return 301 https://\$host:8443\$request_uri;
+}
+server {
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
+    server_name $sn;
+
+    ssl_certificate $cp;
+    ssl_certificate_key $kp;
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+${ws_block}
+    }
+}
+EOF
+}
+
+# 校验并重载 Nginx；校验失败则停用该配置，保护 Nginx 与其他面板
+apply_nginx_conf() {
+    local name="$1" conf="/etc/nginx/conf.d/$1.conf"
+    if nginx -t >/dev/null 2>&1; then
+        if ! systemctl reload nginx 2>/dev/null; then
+            systemctl restart nginx 2>/dev/null || { log_warn "Nginx 重载/重启失败，请执行 systemctl status nginx 查看"; return 1; }
+        fi
+        return 0
+    fi
+    log_error "Nginx 配置检测未通过："
+    nginx -t 2>&1 | tail -n 5
+    if [[ -f "$conf" ]]; then
+        mv -f "$conf" "${conf}.disabled"
+        log_warn "已将 ${name}.conf 暂时停用为 ${name}.conf.disabled，避免影响 Nginx 与其他面板。"
+        log_warn "补齐证书后执行: mv ${conf}.disabled ${conf} && nginx -t && systemctl reload nginx"
+    fi
+    return 1
+}
 
 # ────────────────────────────────────────────────────────────────
 #  卸载功能合集
@@ -92,6 +263,7 @@ uninstall_nginx() {
 
 uninstall_docker() {
     echo -e "${YELLOW}警告：这将彻底删除 Docker 环境及其所有容器和镜像！${NC}"
+    echo -e "${YELLOW}（Sub-Store / Wallos / Komari 依赖 Docker，卸载后这些面板将无法运行）${NC}"
     read -rp "确认卸载？(y/N): " choice
     if [[ "${choice,,}" == "y" ]]; then
         log_step "1. 正在停止并删除所有正在运行的 Docker 容器..."
@@ -155,6 +327,128 @@ uninstall_xray() {
 # ────────────────────────────────────────────────────────────────
 #  三、安装服务（sing-box / Nginx / Docker环境 / 面板 / Realm）
 # ────────────────────────────────────────────────────────────────
+
+# 生成 / 修正 sing-box 的 systemd 服务（ExecStart 跟随实际二进制路径）
+ensure_singbox_service() {
+    local bin
+    bin=$(command -v sing-box 2>/dev/null)
+    [[ -z "$bin" ]] && return 1
+
+    if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
+        cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=/var/lib/sing-box
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+ExecStart=${bin} -D /var/lib/sing-box run -c /etc/sing-box/config.json
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    else
+        # 已存在的 service：同步二进制路径，避免 /usr/bin 与 /usr/local/bin 不一致导致启动失败
+        sed -i -E "s#^ExecStart=[^ ]*sing-box#ExecStart=${bin}#" /etc/systemd/system/sing-box.service
+    fi
+    systemctl daemon-reload
+}
+
+install_singbox() {
+    local vc="$1"
+
+    if is_cmd_exist sing-box; then
+        local ver
+        ver=$(sing-box version 2>/dev/null | head -1)
+        log_info "当前已安装版本: $ver"
+        prompt_reinstall "sing-box" || return 0
+    fi
+
+    if [[ "$vc" == "1" ]]; then
+        log_step "安装 sing-box 最新稳定版..."
+        if ! bash <(curl -fsSL https://sing-box.app/deb-install.sh); then
+            if ! bash <(curl -fsSL https://sing-box.app/rpm-install.sh); then
+                log_error "安装失败，请检查网络或手动安装"
+                return 1
+            fi
+        fi
+    elif [[ "$vc" == "2" ]]; then
+        local SB_VER
+        echo -n "请输入版本号（例如 1.9.0）: "
+        read -r SB_VER
+        [[ -z "$SB_VER" ]] && { log_error "版本号不能为空"; return 1; }
+        log_step "安装 sing-box v${SB_VER}..."
+        local ARCH ARCH_STR
+        ARCH=$(uname -m)
+        case "$ARCH" in
+            x86_64) ARCH_STR="amd64" ;;
+            aarch64) ARCH_STR="arm64" ;;
+            armv7l) ARCH_STR="armv7" ;;
+            *) ARCH_STR="amd64" ;;
+        esac
+        local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
+        if ! curl -fsSL "$URL" -o /tmp/sing-box.tar.gz; then
+            log_error "下载失败，请确认版本号是否存在"
+            return 1
+        fi
+        if ! tar -xzf /tmp/sing-box.tar.gz -C /tmp/; then
+            log_error "解压失败"
+            rm -f /tmp/sing-box.tar.gz
+            return 1
+        fi
+        install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
+        rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
+        hash -r 2>/dev/null || true
+    elif [[ "$vc" == "3" ]]; then
+        log_step "安装 sing-box Beta 版..."
+        if ! bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta; then
+            log_error "Beta 安装失败"
+            return 1
+        fi
+    fi
+
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
+
+    if ! is_cmd_exist sing-box; then
+        log_error "sing-box 安装失败"
+        return 1
+    fi
+
+    ensure_singbox_service
+
+    local ver
+    ver=$(sing-box version 2>/dev/null | head -1)
+    log_success "sing-box 安装成功: $ver"
+
+    # 【核心修复】：防止官方安装包自带的默认 config.json 占用 8080 等端口引发 Nginx/Substore 启动冲突
+    if [[ -f /etc/sing-box/config.json ]] && ! grep -q -E "vless-|vmess-|trojan-|shadowsocks-|hysteria2-|tuic-|anytls-|naive-" /etc/sing-box/config.json; then
+        mv /etc/sing-box/config.json /etc/sing-box/config.json.default.bak 2>/dev/null || true
+        systemctl stop sing-box >/dev/null 2>&1 || true
+    fi
+
+    # 尝试自动启动 (若已存在有效配置)
+    if [[ -s /etc/sing-box/config.json ]]; then
+        if ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
+            systemctl enable sing-box >/dev/null 2>&1 || true
+            systemctl restart sing-box >/dev/null 2>&1 || true
+            sleep 1
+            systemctl is-active --quiet sing-box || log_warn "sing-box 启动失败，请执行 journalctl -u sing-box -n 30 查看原因"
+        else
+            log_warn "检测到现有 sing-box 配置未通过校验，已跳过自动启动。"
+        fi
+    else
+        log_info "提醒: sing-box 核心已就绪。请前往主菜单「4. 配置 sing-box」生成配置，完成后系统将自动守护运行。"
+    fi
+}
+
 install_nginx() {
     local mode="${1:-1}"
     log_step "安装 Nginx..."
@@ -197,77 +491,51 @@ HTML
     # 【核心修复】清理系统自带的 Nginx 默认站点配置，确保 80/8080 端口完全释放，不与其他面板产生底层冲突
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
     
-    if ! nginx -t >/dev/null 2>&1; then
-        log_error "Nginx 配置检查失败；请运行 nginx -t 查看详情"
-        return 1
-    fi
-    if ! systemctl enable nginx >/dev/null 2>&1 || ! systemctl restart nginx >/dev/null 2>&1 || ! systemctl is-active --quiet nginx; then
-        log_error "Nginx 未能启动；请运行 systemctl status nginx 和 journalctl -u nginx -n 50 查看原因"
-        return 1
-    fi
-    log_success "Nginx 安装并启动成功"
+    systemctl enable nginx >/dev/null 2>&1 || true
+    systemctl start nginx >/dev/null 2>&1 || true
+    systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败，请执行 nginx -t 与 systemctl status nginx 排查"
 }
 
 install_docker_env() {
     local mode="${1:-1}"
-    local installer
     log_step "检查并配置 Docker 环境..."
     
     if ! is_cmd_exist docker; then
         log_info "正在安装 Docker..."
-
+        
         if [[ "$mode" == "3" ]]; then
-            installer="https://test.docker.com"
+            curl -fsSL https://test.docker.com -o get-docker.sh || { log_error "下载 Docker 安装脚本失败"; return 1; }
         else
-            installer="https://get.docker.com"
+            curl -fsSL https://get.docker.com -o get-docker.sh || { log_error "下载 Docker 安装脚本失败"; return 1; }
         fi
-
-        if ! curl -fsSL "$installer" -o /tmp/get-docker.sh; then
-            log_error "Docker 安装脚本下载失败"
-            return 1
-        fi
+        
         if [[ "$mode" == "2" ]]; then
             read -rp "请输入 Docker 版本号 (回车跳过使用默认): " d_ver
             if [[ -n "$d_ver" ]]; then
-                VERSION="$d_ver" sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
+                VERSION="$d_ver" sh get-docker.sh || { log_error "Docker 安装失败"; rm -f get-docker.sh; return 1; }
             else
-                sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
+                sh get-docker.sh || { log_error "Docker 安装失败"; rm -f get-docker.sh; return 1; }
             fi
         else
-            sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
+            sh get-docker.sh || { log_error "Docker 安装失败"; rm -f get-docker.sh; return 1; }
         fi
-        rm -f /tmp/get-docker.sh
+        rm -f get-docker.sh
     else
         if ! prompt_reinstall "Docker 环境"; then
             systemctl enable docker >/dev/null 2>&1 || true
             systemctl start docker >/dev/null 2>&1 || true
+            return 0
         fi
     fi
     systemctl enable docker >/dev/null 2>&1 || true
     systemctl start docker >/dev/null 2>&1 || true
 
-    if ! docker info >/dev/null 2>&1; then
-        log_error "Docker 命令可用，但 Docker 守护进程未运行；请检查 systemctl status docker"
-        return 1
-    fi
-
     if ! docker compose version >/dev/null 2>&1; then
         log_info "正在安装 Docker Compose 插件..."
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt update -y && apt install -y docker-compose-plugin || { log_error "Docker Compose 插件安装失败"; return 1; }
-        elif [[ -n "$PKG_MANAGER" ]]; then
-            $PKG_MANAGER install -y docker-compose-plugin || { log_error "Docker Compose 插件安装失败"; return 1; }
-        else
-            log_error "未识别包管理器，无法安装 Docker Compose 插件"
-            return 1
-        fi
+        if [[ "$PKG_MANAGER" == "apt" ]]; then apt update -y && apt install -y docker-compose-plugin
+        else $PKG_MANAGER install -y docker-compose-plugin; fi
     else
         log_success "Docker Compose 已就绪"
-    fi
-
-    if ! docker compose version >/dev/null 2>&1; then
-        log_error "Docker Compose 不可用"
-        return 1
     fi
 }
 
@@ -298,14 +566,7 @@ install_xray() {
             armv7l) ARCH_STR="arm32-v7a" ;;
             *) ARCH_STR="64" ;;
         esac
-        if ! is_cmd_exist unzip; then
-            if [[ "$PKG_MANAGER" == "apt" ]]; then
-                apt update -y >/dev/null 2>&1 || true
-                apt install -y unzip >/dev/null 2>&1 || true
-            else
-                $PKG_MANAGER install -y unzip >/dev/null 2>&1 || true
-            fi
-        fi
+        ensure_unzip || return 1
         local URL="https://github.com/XTLS/Xray-core/releases/download/v${x_ver}/Xray-linux-${ARCH_STR}.zip"
         rm -rf /tmp/xray-dl && mkdir -p /tmp/xray-dl
         if ! curl -fsSL "$URL" -o /tmp/xray-dl/xray.zip; then
@@ -323,6 +584,7 @@ install_xray() {
         [[ -f /tmp/xray-dl/geoip.dat ]] && install -m 644 /tmp/xray-dl/geoip.dat /usr/local/share/xray/geoip.dat
         [[ -f /tmp/xray-dl/geosite.dat ]] && install -m 644 /tmp/xray-dl/geosite.dat /usr/local/share/xray/geosite.dat
         rm -rf /tmp/xray-dl
+        hash -r 2>/dev/null || true
     else
         log_step "正在通过 XTLS 官方一键脚本安装 Xray-core...$( [[ "$mode" == "3" ]] && echo " (Beta/预发布版)")"
         if [[ "$mode" == "3" ]]; then
@@ -341,7 +603,9 @@ install_xray() {
     mkdir -p /usr/local/etc/xray /var/log/xray
 
     if [[ ! -f /etc/systemd/system/xray.service ]]; then
-        cat > /etc/systemd/system/xray.service << 'EOF'
+        local xbin
+        xbin=$(command -v xray 2>/dev/null || echo /usr/local/bin/xray)
+        cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
 Description=Xray Service
 Documentation=https://github.com/xtls
@@ -352,7 +616,7 @@ User=root
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+ExecStart=${xbin} run -config /usr/local/etc/xray/config.json
 Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=10000
@@ -378,16 +642,24 @@ EOF
         if [[ -s /usr/local/etc/xray/config.json ]]; then
             if xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
                 systemctl enable xray >/dev/null 2>&1 || true
-                systemctl start xray >/dev/null 2>&1 || true
+                systemctl restart xray >/dev/null 2>&1 || true
+                sleep 1
+                systemctl is-active --quiet xray || log_warn "Xray 启动失败，请执行 journalctl -u xray -n 30 查看原因"
+            else
+                log_warn "检测到现有 Xray 配置未通过校验，已跳过自动启动。"
             fi
         else
             log_info "提醒: Xray-core 核心已就绪。请前往主菜单「四、配置节点」选择 Xray-core 内核生成配置，完成后系统将自动守护运行。"
         fi
     else
         log_error "Xray-core 安装失败"
+        return 1
     fi
 }
 
+# ────────────────────────────────────────────────────────────────
+#  Docker 面板类服务（Sub-Store / Wallos / Komari）—— 依赖 Docker + Nginx
+# ────────────────────────────────────────────────────────────────
 install_substore() {
     local sub_ver_choice="${1:-1}"
     
@@ -429,8 +701,7 @@ install_substore() {
             fi
         fi
     else
-        echo -e "
-${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
+        echo -e "\n${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         echo "  1) 直接安装 [默认]"
         echo "  2) 导入旧链接 (手动粘贴)"
         local choice
@@ -448,21 +719,14 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         fi
     fi
 
-    install_docker_env 1 || return 1
-    
-    if ! is_cmd_exist nginx; then
-        log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1 || return 1
-    fi
+    # 依赖检查：Docker + Nginx + unzip，任一失败即中止
+    ensure_docker_ready || return 1
+    ensure_nginx_ready || return 1
+    ensure_unzip || return 1
 
-    if ! is_cmd_exist unzip; then
-        log_info "正在为您自动安装必要的 unzip 解压工具..."
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt update -y >/dev/null 2>&1 || true
-            apt install -y unzip >/dev/null 2>&1 || true
-        else
-            $PKG_MANAGER install -y unzip >/dev/null 2>&1 || true
-        fi
+    if port_in_use 3001; then
+        log_error "本机 3001 端口已被占用，Sub-Store 无法启动，请先释放该端口"
+        return 1
     fi
 
     log_step "部署 Sub-Store (订阅转换中心)"
@@ -511,12 +775,11 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
     
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
-        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
-        log_warn "请后续确保将正确的证书文件放置于: $cp"
+        log_warn "Nginx 反代配置将无法通过校验并被自动停用，请后续将正确的证书文件放置于: $cp"
     fi
 
     mkdir -p /root/docker/substore/data
-    cd /root/docker/substore
+    cd /root/docker/substore || return 1
 
     local api_path
     if [[ -n "$old_sub_api" ]]; then
@@ -534,11 +797,15 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
     echo "$sn" > domain.txt
 
     log_info "正在为您下载并部署选中版本的核心代码..."
-    curl -fsSL -L "$backend_url" -o sub-store.bundle.js
-    curl -fsSL -L "$frontend_url" -o dist.zip
+    curl -fsSL -L "$backend_url" -o sub-store.bundle.js || { log_error "Sub-Store 后端下载失败，请确认版本号/网络"; return 1; }
+    curl -fsSL -L "$frontend_url" -o dist.zip || { log_error "Sub-Store 前端下载失败，请确认版本号/网络"; return 1; }
     
     rm -rf frontend dist_tmp
-    unzip -qo dist.zip -d dist_tmp || log_warn "前端解压出现异常，可能下载不完整"
+    if ! unzip -qo dist.zip -d dist_tmp; then
+        log_error "前端解压失败，下载可能不完整"
+        rm -rf dist_tmp dist.zip
+        return 1
+    fi
     if [[ -d "dist_tmp/dist" ]]; then
         mv dist_tmp/dist frontend
     else
@@ -547,7 +814,6 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
     rm -rf dist_tmp dist.zip
 
     cat > docker-compose.yml <<EOF
-version: '3.8'
 services:
   substore:
     image: node:20.18.0
@@ -579,43 +845,13 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose up -d || { log_error "Sub-Store 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
+    compose_up || { log_error "容器启动命令执行失败"; return 1; }
+    wait_container_running substore || return 1
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
-    mkdir -p /etc/nginx/conf.d
-    
-    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
-    # 【优化3修复】：Connection 头改为跟随客户端实际请求头 $http_connection，
-    # 避免所有普通 HTTP 请求被误当成 WebSocket 升级请求，导致登录等请求出现连接被重置/Network error
-    cat > /etc/nginx/conf.d/substore.conf <<EOF
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name $sn;
-    return 301 https://\$host:8443\$request_uri;
-}
-server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
-    server_name $sn;
-
-    ssl_certificate $cp;
-    ssl_certificate_key $kp;
-
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$http_connection;
-    }
-}
-EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
+    write_panel_nginx_conf "substore" "$sn" "$cp" "$kp" 3001 true
+    apply_nginx_conf "substore" || log_warn "容器已运行，但 Nginx 反代未生效，暂时无法通过域名访问"
     
     echo ""
     log_success "Sub-Store 部署完成！"
@@ -664,8 +900,7 @@ install_wallos() {
             fi
         fi
     else
-        echo -e "
-${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
+        echo -e "\n${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
         echo "  1) 直接安装 [默认]"
         echo "  2) 导入旧链接 (手动粘贴)"
         local choice
@@ -692,11 +927,13 @@ ${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
         wallos_ver="beta"
     fi
 
-    install_docker_env 1 || return 1
-    
-    if ! is_cmd_exist nginx; then
-        log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1 || return 1
+    # 依赖检查：Docker + Nginx，任一失败即中止
+    ensure_docker_ready || return 1
+    ensure_nginx_ready || return 1
+
+    if port_in_use 8282; then
+        log_error "本机 8282 端口已被占用，Wallos 无法启动，请先释放该端口"
+        return 1
     fi
 
     log_step "部署 Wallos (订阅管理与财务系统) - 版本: $wallos_ver"
@@ -739,16 +976,14 @@ ${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
     
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
-        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
-        log_warn "请后续确保将正确的证书文件放置于: $cp"
+        log_warn "Nginx 反代配置将无法通过校验并被自动停用，请后续将正确的证书文件放置于: $cp"
     fi
 
     mkdir -p /root/docker/wallos/{db,logos}
-    cd /root/docker/wallos
+    cd /root/docker/wallos || return 1
     echo "$sn" > domain.txt
 
     cat > docker-compose.yml <<EOF
-version: '3.8'
 services:
   wallos:
     container_name: wallos
@@ -769,38 +1004,13 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose up -d || { log_error "Wallos 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
+    compose_up || { log_error "容器启动命令执行失败（请确认镜像标签 $wallos_ver 是否存在）"; return 1; }
+    wait_container_running wallos || return 1
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
-    mkdir -p /etc/nginx/conf.d
-    
-    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
-    cat > /etc/nginx/conf.d/wallos.conf <<EOF
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name $sn;
-    return 301 https://\$host:8443\$request_uri;
-}
-server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
-    server_name $sn;
-
-    ssl_certificate $cp;
-    ssl_certificate_key $kp;
-
-    location / {
-        proxy_pass http://127.0.0.1:8282;
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
+    write_panel_nginx_conf "wallos" "$sn" "$cp" "$kp" 8282 false
+    apply_nginx_conf "wallos" || log_warn "容器已运行，但 Nginx 反代未生效，暂时无法通过域名访问"
     
     echo ""
     log_success "Wallos 部署完成！"
@@ -847,8 +1057,7 @@ install_komari() {
             fi
         fi
     else
-        echo -e "
-${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
+        echo -e "\n${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
         echo "  1) 直接安装 [默认]"
         echo "  2) 导入旧链接 (手动粘贴)"
         local choice
@@ -882,11 +1091,13 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
         fi
     fi
 
-    install_docker_env 1 || return 1
+    # 依赖检查：Docker + Nginx，任一失败即中止
+    ensure_docker_ready || return 1
+    ensure_nginx_ready || return 1
 
-    if ! is_cmd_exist nginx; then
-        log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1 || return 1
+    if port_in_use 25774; then
+        log_error "本机 25774 端口已被占用，Komari 无法启动，请先释放该端口"
+        return 1
     fi
 
     log_step "部署 Komari (轻量级服务器监控探针) - 镜像版本: $komari_tag"
@@ -936,12 +1147,11 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
 
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
-        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
-        log_warn "请后续确保将正确的证书文件放置于: $cp"
+        log_warn "Nginx 反代配置将无法通过校验并被自动停用，请后续将正确的证书文件放置于: $cp"
     fi
 
     mkdir -p /root/docker/komari/data
-    cd /root/docker/komari
+    cd /root/docker/komari || return 1
     echo "$sn" > domain.txt
 
     local admin_user=""
@@ -950,7 +1160,6 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
     read -rp "请输入 Komari 初始管理员密码 (回车则由系统随机生成): " admin_pass
 
     cat > docker-compose.yml <<EOF
-version: '3.8'
 services:
   komari:
     image: ghcr.io/komari-monitor/komari:$komari_tag
@@ -962,10 +1171,10 @@ services:
       TZ: "Asia/Shanghai"
 EOF
     if [[ -n "$admin_user" ]]; then
-        echo "      ADMIN_USERNAME: \"$admin_user\"" >> docker-compose.yml
+        echo "      ADMIN_USERNAME: \"$(yaml_escape "$admin_user")\"" >> docker-compose.yml
     fi
     if [[ -n "$admin_pass" ]]; then
-        echo "      ADMIN_PASSWORD: \"$admin_pass\"" >> docker-compose.yml
+        echo "      ADMIN_PASSWORD: \"$(yaml_escape "$admin_pass")\"" >> docker-compose.yml
     fi
     cat >> docker-compose.yml <<EOF
     volumes:
@@ -978,43 +1187,13 @@ EOF
 EOF
 
     log_info "启动容器..."
-    docker compose up -d || { log_error "Komari 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
+    compose_up || { log_error "容器启动命令执行失败（请确认镜像标签 $komari_tag 是否存在）"; return 1; }
+    wait_container_running komari || return 1
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
-    mkdir -p /etc/nginx/conf.d
-
-    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
-    # 【优化3修复】：Connection 头改为跟随客户端实际请求头 $http_connection，
-    # 避免所有普通 HTTP 请求被误当成 WebSocket 升级请求，导致登录页出现 Network error
-    cat > /etc/nginx/conf.d/komari.conf <<EOF
-server {
-    listen 8080;
-    listen [::]:8080;
-    server_name $sn;
-    return 301 https://\$host:8443\$request_uri;
-}
-server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
-    server_name $sn;
-
-    ssl_certificate $cp;
-    ssl_certificate_key $kp;
-
-    location / {
-        proxy_pass http://127.0.0.1:25774;
-        proxy_set_header Host \$http_host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection \$http_connection;
-    }
-}
-EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
+    write_panel_nginx_conf "komari" "$sn" "$cp" "$kp" 25774 true
+    apply_nginx_conf "komari" || log_warn "容器已运行，但 Nginx 反代未生效，暂时无法通过域名访问"
 
     echo ""
     log_success "Komari 探针部署完成！"
@@ -1024,40 +1203,60 @@ EOF
     echo ""
 }
 
-# ----------------- Realm 端口转发功能模块 -----------------
-deploy_realm() {
-    local arch asset_url
-    case "$(uname -m)" in
-        x86_64|amd64) arch="x86_64" ;;
-        aarch64|arm64) arch="aarch64" ;;
-        *) log_error "当前架构 $(uname -m) 暂不支持 Realm"; return 1 ;;
-    esac
+# ----------------- Realm 端口转发功能模块（不依赖 Docker / Nginx） -----------------
+REALM_DIR="/root/realm"
+REALM_CONF="/root/realm/config.toml"
 
-    if [[ -x "/root/realm/realm" ]]; then
+# 配置中是否至少有一条转发规则（realm 无 endpoints 会直接退出）
+realm_has_rules() {
+    grep -q '^\[\[endpoints\]\]' "$REALM_CONF" 2>/dev/null
+}
+
+deploy_realm() {
+    if [[ -f "$REALM_DIR/realm" ]]; then
         if ! prompt_reinstall "Realm"; then return 0; fi
         systemctl stop realm 2>/dev/null || true
     fi
 
     log_step "部署 Realm 端口转发环境"
-    mkdir -p /root/realm || { log_error "无法创建 /root/realm"; return 1; }
-    asset_url="https://github.com/github19999/fork-realm/releases/download/v2.6.0/realm-${arch}-unknown-linux-gnu.tar.gz"
-    if ! curl -fL --retry 3 --connect-timeout 15 "$asset_url" -o /tmp/realm.tar.gz; then
-        log_error "Realm 下载失败，请检查网络或该架构的 Release 资源"
+
+    local ARCH ARCH_STR
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  ARCH_STR="x86_64" ;;
+        aarch64) ARCH_STR="aarch64" ;;
+        *) log_error "暂不支持的 CPU 架构: $ARCH"; return 1 ;;
+    esac
+
+    mkdir -p "$REALM_DIR"
+    cd "$REALM_DIR" || return 1
+
+    local URL="https://github.com/github19999/fork-realm/releases/download/v2.6.0/realm-${ARCH_STR}-unknown-linux-gnu.tar.gz"
+    log_info "正在下载 Realm ($ARCH_STR)..."
+    if ! curl -fsSL --retry 3 "$URL" -o realm.tar.gz; then
+        log_error "Realm 下载失败，请检查网络或确认该架构的发布包存在"
+        rm -f realm.tar.gz
         return 1
     fi
-    if ! tar -xzf /tmp/realm.tar.gz -C /root/realm realm; then
-        rm -f /tmp/realm.tar.gz
-        log_error "Realm 安装包解压失败"
+    if ! tar -xzf realm.tar.gz; then
+        log_error "Realm 解压失败"
+        rm -f realm.tar.gz
         return 1
     fi
-    rm -f /tmp/realm.tar.gz
-    chmod 755 /root/realm/realm || { log_error "设置 Realm 执行权限失败"; return 1; }
-    if [[ ! -f /root/realm/config.toml ]]; then
-        install -m 600 /dev/null /root/realm/config.toml
+    rm -f realm.tar.gz
+    chmod +x realm
+
+    # 自检：二进制必须能在本机运行（排除架构 / glibc 不匹配）
+    if ! ./realm --version >/dev/null 2>&1; then
+        log_error "Realm 二进制无法在本机运行（架构或系统库不兼容）"
+        return 1
     fi
+
+    # 【根因修复】不再使用 DynamicUser=true：它会让服务以临时低权限用户运行，
+    # 无法访问 /root/realm，导致 203/EXEC 启动失败；且与 User=root 冲突。
     cat > /etc/systemd/system/realm.service << 'EOF'
 [Unit]
-Description=Realm port forwarder
+Description=realm
 After=network-online.target
 Wants=network-online.target
 
@@ -1068,70 +1267,82 @@ Restart=on-failure
 RestartSec=5s
 WorkingDirectory=/root/realm
 ExecStart=/root/realm/realm -c /root/realm/config.toml
-NoNewPrivileges=true
-PrivateTmp=true
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload || { log_error "systemd 配置重载失败"; return 1; }
-    if ! systemctl enable --now realm.service; then
-        log_error "Realm 服务启动失败；请运行 systemctl status realm 和 journalctl -u realm -n 50 查看原因"
-        return 1
+    [[ -f "$REALM_CONF" ]] || touch "$REALM_CONF"
+    systemctl unmask realm.service 2>/dev/null || true
+    systemctl daemon-reload
+
+    log_success "Realm 部署完成。"
+    if realm_has_rules; then
+        start_service_realm
+    else
+        log_info "提醒: 当前还没有转发规则，realm 无规则无法运行。请先选择「2) 添加转发」，添加后会自动启动。"
     fi
-    if ! systemctl is-active --quiet realm.service; then
-        log_error "Realm 服务未进入运行状态；请运行 journalctl -u realm -n 50 查看原因"
-        return 1
-    fi
-    log_success "Realm 已安装并启动，且已设置为开机自启。"
 }
 
 add_forward_realm() {
-    if [[ ! -x "/root/realm/realm" ]]; then
-        log_error "请先安装 Realm"
+    log_step "添加 Realm 转发规则"
+    if [[ ! -x "$REALM_DIR/realm" ]]; then
+        log_error "Realm 尚未部署，请先执行「1) 部署环境」"
         return 1
     fi
-    log_step "添加 Realm 转发规则"
-    if [ ! -f "/root/realm/config.toml" ]; then
-        touch /root/realm/config.toml
-    fi
+    [[ -f "$REALM_CONF" ]] || touch "$REALM_CONF"
+
+    local ip port answer added=false
     while true; do
-        read -p "请输入目标 IP: " ip
-        read -p "请输入本地/目标端口 (同端口): " port
-        echo "[[endpoints]]" >> /root/realm/config.toml
-        echo "listen = \"0.0.0.0:$port\"" >> /root/realm/config.toml
-        echo "remote = \"$ip:$port\"" >> /root/realm/config.toml
+        read -rp "请输入目标 IP/域名: " ip
+        read -rp "请输入本地/目标端口 (同端口): " port
+
+        if [[ -z "$ip" || ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+            log_warn "输入无效：目标不能为空，端口需为 1-65535 的数字"
+            continue
+        fi
+        if port_in_use "$port"; then
+            log_warn "本机 $port 端口已被占用（可能是已有转发规则或其他服务），请换一个端口"
+            continue
+        fi
+        # IPv6 地址自动补方括号
+        [[ "$ip" == *:* && "$ip" != \[* ]] && ip="[$ip]"
+
+        {
+            echo "[[endpoints]]"
+            echo "listen = \"0.0.0.0:$port\""
+            echo "remote = \"$ip:$port\""
+        } >> "$REALM_CONF"
+        added=true
         
-        read -p "是否继续添加(Y/N)? " answer
+        read -rp "是否继续添加(Y/N)? " answer
         if [[ "${answer,,}" != "y" ]]; then
             break
         fi
     done
-    if systemctl restart realm.service; then
-        log_success "转发规则已添加并生效。"
-    else
-        log_error "Realm 重启失败；请运行 journalctl -u realm -n 50 查看原因"
-        return 1
+
+    if [[ "$added" == "true" ]]; then
+        log_success "转发规则已写入配置。"
+        start_service_realm
     fi
 }
 
 delete_forward_realm() {
     log_step "删除 Realm 转发规则"
-    if [ ! -f "/root/realm/config.toml" ]; then
-        log_warn "未找到配置文件 /root/realm/config.toml"
+    if [ ! -f "$REALM_CONF" ]; then
+        log_warn "未找到配置文件 $REALM_CONF"
         return
     fi
     echo "当前转发规则："
-    local IFS=$'
-'
-    local lines=($(grep -n 'remote =' /root/realm/config.toml))
+    local IFS=$'\n'
+    local lines=($(grep -n 'remote =' "$REALM_CONF"))
     if [ ${#lines[@]} -eq 0 ]; then
         echo "没有发现任何转发规则。"
         return
     fi
     local index=1
     for line in "${lines[@]}"; do
-        echo "${index}. $(echo $line | cut -d '"' -f 2)"
+        echo "${index}. $(echo "$line" | cut -d '"' -f 2)"
         let index+=1
     done
 
@@ -1147,37 +1358,53 @@ delete_forward_realm() {
         return
     fi
 
-    if [ $choice -lt 1 ] || [ $choice -gt ${#lines[@]} ]; then
+    if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#lines[@]} ]; then
         echo "选择超出范围，请输入有效序号。"
         return
     fi
 
     local chosen_line=${lines[$((choice-1))]}
-    local line_number=$(echo $chosen_line | cut -d ':' -f 1)
+    local line_number
+    line_number=$(echo "$chosen_line" | cut -d ':' -f 1)
 
     local start_line=$((line_number - 2))
     local end_line=$line_number
+    [ "$start_line" -lt 1 ] && start_line=1
 
-    sed -i "${start_line},${end_line}d" /root/realm/config.toml
-
+    sed -i "${start_line},${end_line}d" "$REALM_CONF"
     log_success "转发规则已删除。"
-    if ! systemctl restart realm.service; then
-        log_error "规则已从配置中删除，但 Realm 重启失败；请检查 journalctl -u realm -n 50"
-        return 1
+
+    if realm_has_rules; then
+        systemctl restart realm 2>/dev/null || true
+    else
+        # 规则删光后 realm 无法运行，主动停止并取消自启，避免反复失败重启
+        systemctl stop realm 2>/dev/null || true
+        systemctl disable realm 2>/dev/null || true
+        log_info "已无任何转发规则，realm 服务已停止（添加新规则后会自动启动）。"
     fi
-    log_success "转发规则已删除并生效。"
 }
 
 start_service_realm() {
-    if [[ ! -x "/root/realm/realm" || ! -f /etc/systemd/system/realm.service ]]; then
-        log_error "Realm 未完整安装，请重新部署"
+    if [[ ! -x "$REALM_DIR/realm" ]]; then
+        log_error "Realm 尚未部署，请先执行「1) 部署环境」"
         return 1
     fi
-    if ! systemctl daemon-reload || ! systemctl enable --now realm.service || ! systemctl is-active --quiet realm.service; then
-        log_error "Realm 启动失败；请运行 systemctl status realm 和 journalctl -u realm -n 50 查看原因"
+    if ! realm_has_rules; then
+        log_warn "尚未添加任何转发规则，realm 无规则无法启动。请先选择「2) 添加转发」。"
         return 1
     fi
-    log_success "Realm 服务已启动并设置为开机自启。"
+    systemctl unmask realm.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable realm.service >/dev/null 2>&1 || true
+    systemctl restart realm.service 2>/dev/null || true
+    sleep 1
+    if systemctl is-active --quiet realm; then
+        log_success "realm 服务已启动并设置为开机自启。"
+    else
+        log_error "realm 服务启动失败，最近日志如下："
+        journalctl -u realm -n 15 --no-pager 2>/dev/null || systemctl status realm --no-pager 2>/dev/null | tail -n 15
+        return 1
+    fi
 }
 
 stop_service_realm() {
@@ -1191,7 +1418,7 @@ uninstall_realm() {
     systemctl disable realm 2>/dev/null || true
     rm -f /etc/systemd/system/realm.service
     systemctl daemon-reload 2>/dev/null || true
-    rm -rf /root/realm
+    rm -rf "$REALM_DIR"
     hash -r 2>/dev/null || true
     log_success "realm 已被彻底卸载。"
     press_enter
@@ -1201,10 +1428,11 @@ menu_manage_realm() {
     while true; do
         clear
         echo -e "${BOLD}${CYAN}══ 管理 Realm (端口转发) ══${NC}"
+        echo -e "${CYAN}（Realm 不依赖 Docker / Nginx）${NC}"
         echo ""
         
         local is_installed=false
-        if [[ -f "/root/realm/realm" ]]; then
+        if [[ -f "$REALM_DIR/realm" ]]; then
             is_installed=true
         fi
 
@@ -1212,6 +1440,8 @@ menu_manage_realm() {
         if [[ "$is_installed" == "true" ]]; then
             if systemctl is-active --quiet realm 2>/dev/null; then
                 status_str="${GREEN}● 运行中${NC}"
+            elif ! realm_has_rules; then
+                status_str="${YELLOW}○ 已部署，尚未添加转发规则${NC}"
             else
                 status_str="${YELLOW}○ 已停止${NC}"
             fi
@@ -1252,6 +1482,7 @@ menu_install_service() {
     while true; do
         clear
         echo -e "${BOLD}${CYAN}══ 三、安装服务 (包含 Docker/拓展) ══${NC}"
+        echo -e "  ${YELLOW}标注【需Docker】的服务依赖 Docker + Nginx，缺失时会自动安装，安装失败则中止${NC}"
         echo ""
         echo -e "  ${CYAN}── 核心代理 (sing-box) ──${NC}"
         echo "  1) 安装 sing-box 最新稳定版"
@@ -1268,28 +1499,28 @@ menu_install_service() {
         echo "  8) 安装 Docker 指定版本号"
         echo "  9) 安装 Docker Beta / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── Sub-Store (订阅转换中心) ──${NC}"
-        echo " 10) 安装 Sub-Store 最新稳定版 [需要 Docker]"
-        echo " 11) 安装 Sub-Store 指定版本号 [需要 Docker]"
-        echo " 12) 安装 Sub-Store / 预发布版 [需要 Docker]"
+        echo -e "  ${CYAN}── Sub-Store (订阅转换中心) ${YELLOW}【需Docker】${CYAN}──${NC}"
+        echo " 10) 安装 Sub-Store 最新稳定版"
+        echo " 11) 安装 Sub-Store 指定版本号"
+        echo " 12) 安装 Sub-Store / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── Wallos (个人财务与订阅追踪) ──${NC}"
-        echo " 13) 安装 Wallos 最新稳定版 [需要 Docker]"
-        echo " 14) 安装 Wallos 指定版本号 (默认: 2.36.2，回车确认) [需要 Docker]"
-        echo " 15) 安装 Wallos Beta / 预发布版 [需要 Docker]"
+        echo -e "  ${CYAN}── Wallos (个人财务与订阅追踪) ${YELLOW}【需Docker】${CYAN}──${NC}"
+        echo " 13) 安装 Wallos 最新稳定版"
+        echo " 14) 安装 Wallos 指定版本号 (默认: 2.36.2，回车确认)"
+        echo " 15) 安装 Wallos Beta / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── Realm (端口转发工具) ──${NC}"
-        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载；无需 Docker)"
+        echo -e "  ${CYAN}── Realm (端口转发工具，无需Docker) ──${NC}"
+        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载)"
         echo ""
         echo -e "  ${CYAN}── 核心代理 (Xray) ──${NC}"
         echo " 17) 安装 Xray 最新稳定版"
         echo " 18) 安装 Xray 指定版本号"
         echo " 19) 安装 Xray Beta / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── Komari (轻量级服务器监控探针) ──${NC}"
-        echo " 20) 安装 Komari 最新稳定版 [需要 Docker]"
-        echo " 21) 安装 Komari 指定版本号 [需要 Docker]"
-        echo " 22) 安装 Komari Snapshot / 预发布版 [需要 Docker]"
+        echo -e "  ${CYAN}── Komari (轻量级服务器监控探针) ${YELLOW}【需Docker】${CYAN}──${NC}"
+        echo " 20) 安装 Komari 最新稳定版"
+        echo " 21) 安装 Komari 指定版本号"
+        echo " 22) 安装 Komari Snapshot / 预发布版"
         echo ""
         echo -e "  ${CYAN}── 批量执行 ──${NC}"
         echo -e " ${GREEN}100) 全部自动执行 (所有服务)${NC}"
@@ -1330,108 +1561,7 @@ menu_install_service() {
         for vc in "${SVC_CHOICES[@]}"; do
             case $vc in
                 0) return ;;
-                1|2|3)
-                    if is_cmd_exist sing-box; then
-                        local ver
-                        ver=$(sing-box version 2>/dev/null | head -1)
-                        log_info "当前已安装版本: $ver"
-                        if ! prompt_reinstall "sing-box"; then
-                            [[ "$is_batch" == "false" ]] && press_enter
-                            continue
-                        fi
-                    fi
-
-                    if [[ "$vc" == "1" ]]; then
-                        log_step "安装 sing-box 最新稳定版..."
-                        if ! bash <(curl -fsSL https://sing-box.app/deb-install.sh); then
-                            if ! bash <(curl -fsSL https://sing-box.app/rpm-install.sh); then
-                                log_error "安装失败，请检查网络或手动安装"
-                                [[ "$is_batch" == "false" ]] && press_enter
-                                continue
-                            fi
-                        fi
-                    elif [[ "$vc" == "2" ]]; then
-                        echo -n "请输入版本号（例如 1.9.0）: "
-                        read -r SB_VER
-                        [[ -z "$SB_VER" ]] && { log_error "版本号不能为空"; [[ "$is_batch" == "false" ]] && press_enter; continue; }
-                        log_step "安装 sing-box v${SB_VER}..."
-                        local ARCH
-                        ARCH=$(uname -m)
-                        case "$ARCH" in
-                            x86_64) ARCH_STR="amd64" ;;
-                            aarch64) ARCH_STR="arm64" ;;
-                            armv7l) ARCH_STR="armv7" ;;
-                            *) ARCH_STR="amd64" ;;
-                        esac
-                        local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
-                        if ! curl -fsSL "$URL" -o /tmp/sing-box.tar.gz; then
-                            log_error "下载失败"
-                            [[ "$is_batch" == "false" ]] && press_enter
-                            continue
-                        fi
-                        tar -xzf /tmp/sing-box.tar.gz -C /tmp/
-                        install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
-                        rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
-                    elif [[ "$vc" == "3" ]]; then
-                        log_step "安装 sing-box Beta 版..."
-                        if ! bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta; then
-                            log_error "Beta 安装失败"
-                            [[ "$is_batch" == "false" ]] && press_enter
-                            continue
-                        fi
-                    fi
-
-                    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
-
-                    if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
-                        cat > /etc/systemd/system/sing-box.service << 'EOF'
-[Unit]
-Description=sing-box service
-Documentation=https://sing-box.sagernet.org
-After=network.target nss-lookup.target
-
-[Service]
-User=root
-WorkingDirectory=/var/lib/sing-box
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-ExecStart=/usr/bin/sing-box -D /var/lib/sing-box run -c /etc/sing-box/config.json
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
-                        systemctl daemon-reload
-                    fi
-
-                    if is_cmd_exist sing-box; then
-                        local ver
-                        ver=$(sing-box version 2>/dev/null | head -1)
-                        log_success "sing-box 安装成功: $ver"
-                        
-                        # 【核心修复】：防止官方安装包自带的默认 config.json 占用 8080 等端口引发 Nginx/Substore 启动冲突
-                        if [[ -f /etc/sing-box/config.json ]] && ! grep -q -E "vless-|vmess-|trojan-|shadowsocks-|hysteria2-|tuic-|anytls-|naive-" /etc/sing-box/config.json; then
-                            mv /etc/sing-box/config.json /etc/sing-box/config.json.default.bak 2>/dev/null || true
-                            systemctl stop sing-box >/dev/null 2>&1 || true
-                        fi
-                        
-                        # 尝试自动启动 (若已存在有效配置)
-                        if [[ -s /etc/sing-box/config.json ]]; then
-                            if ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
-                                systemctl enable sing-box >/dev/null 2>&1 || true
-                                systemctl start sing-box >/dev/null 2>&1 || true
-                            fi
-                        else
-                            log_info "提醒: sing-box 核心已就绪。请前往主菜单「4. 配置 sing-box」生成配置，完成后系统将自动守护运行。"
-                        fi
-                    else
-                        log_error "sing-box 安装失败"
-                    fi
-                    [[ "$is_batch" == "false" ]] && press_enter
-                    ;;
+                1|2|3) install_singbox "$vc"; [[ "$is_batch" == "false" ]] && press_enter ;;
                 4) install_nginx 1; [[ "$is_batch" == "false" ]] && press_enter ;;
                 5) install_nginx 2; [[ "$is_batch" == "false" ]] && press_enter ;;
                 6) install_nginx 3; [[ "$is_batch" == "false" ]] && press_enter ;;
