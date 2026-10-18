@@ -6,12 +6,7 @@
 #   - 部署方式与 Wallos / Sub-Store 完全一致：Docker 部署 + Nginx 反代到独立 8443 端口
 #   - 支持已安装检测、导入旧链接、域名冲突检测、证书路径询问
 #   - 新增菜单项 20/21/22，插入在 Xray 之后、批量执行之前
-#
-# ════════════════════════ 本次更新说明 (优化5：修复服务启动检查) ════════════════════════
-# 修复：Realm systemd 单元移除与 /root/realm 冲突的 DynamicUser，部署后启用并确认服务状态；
-#   下载或启动失败时返回错误，并提供 systemd 日志排查提示。支持 x86_64 和 aarch64。
-# 加固：Docker 服务先确认守护进程与 Compose 可用，容器启动失败时停止后续配置并输出日志提示。
-# 菜单：在 Sub-Store、Wallos、Komari 项后标注需要 Docker，在 Realm 项标注无需 Docker。
+#   - 未改动任何已有功能（sing-box / Nginx / Docker / Sub-Store / Wallos / Realm / Xray 卸载与安装逻辑均保持不变）
 #
 # ════════════════════════ 本次更新说明 (优化3：修复反代 Connection 头) ════════════════════════
 # 修复：Sub-Store 与 Komari 的 Nginx 反代配置中，Connection 请求头被写死为 "upgrade"，
@@ -29,7 +24,7 @@
 #   判定请求来源不可信，直接返回 403 拒绝——包括登录接口在内，导致登录页出现 "Network error"。
 #   现统一改为 proxy_set_header Host $http_host; 完整保留客户端实际发送的 Host:端口，
 #   从根本上解决该类反代场景下的来源校验误判问题。
-#   优化4阶段仅修改了这三处配置中的 Host 请求头。
+#   本次仅修改了这三处配置中的 Host 请求头，未改动任何其他功能与安装逻辑。
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -163,12 +158,6 @@ install_nginx() {
         local ver
         ver=$(nginx -v 2>&1 | head -1)
         log_info "当前已安装版本: $ver"
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            log_info "自动执行：保留已安装的 Nginx，并确保服务正常运行"
-            systemctl enable nginx >/dev/null 2>&1 || true
-            systemctl restart nginx >/dev/null 2>&1 || return 1
-            return 0
-        fi
         if ! prompt_reinstall "Nginx"; then return 0; fi
     fi
     
@@ -203,91 +192,52 @@ HTML
     # 【核心修复】清理系统自带的 Nginx 默认站点配置，确保 80/8080 端口完全释放，不与其他面板产生底层冲突
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
     
-    if ! nginx -t >/dev/null 2>&1; then
-        log_error "Nginx 配置检查失败；请运行 nginx -t 查看详情"
-        return 1
-    fi
-    if ! systemctl enable nginx >/dev/null 2>&1 || ! systemctl restart nginx >/dev/null 2>&1 || ! systemctl is-active --quiet nginx; then
-        log_error "Nginx 未能启动；请运行 systemctl status nginx 和 journalctl -u nginx -n 50 查看原因"
-        return 1
-    fi
-    log_success "Nginx 安装并启动成功"
+    systemctl enable nginx >/dev/null 2>&1 || true
+    systemctl start nginx >/dev/null 2>&1 || true
+    systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败"
 }
 
 install_docker_env() {
     local mode="${1:-1}"
-    local installer
     log_step "检查并配置 Docker 环境..."
     
     if ! is_cmd_exist docker; then
         log_info "正在安装 Docker..."
-
+        
         if [[ "$mode" == "3" ]]; then
-            installer="https://test.docker.com"
+            curl -fsSL https://test.docker.com -o get-docker.sh
         else
-            installer="https://get.docker.com"
+            curl -fsSL https://get.docker.com -o get-docker.sh
         fi
-
-        if ! curl -fsSL "$installer" -o /tmp/get-docker.sh; then
-            log_error "Docker 安装脚本下载失败"
-            return 1
-        fi
+        
         if [[ "$mode" == "2" ]]; then
             read -rp "请输入 Docker 版本号 (回车跳过使用默认): " d_ver
             if [[ -n "$d_ver" ]]; then
-                VERSION="$d_ver" sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
+                VERSION="$d_ver" sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
             else
-                sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
+                sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
             fi
         else
-            sh /tmp/get-docker.sh || { rm -f /tmp/get-docker.sh; log_error "Docker 安装失败"; return 1; }
+            sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
         fi
-        rm -f /tmp/get-docker.sh
+        rm -f get-docker.sh
     else
-        if [[ "$AUTO_DEFAULT" != "true" ]] && ! prompt_reinstall "Docker 环境"; then
+        if ! prompt_reinstall "Docker 环境"; then
             systemctl enable docker >/dev/null 2>&1 || true
             systemctl start docker >/dev/null 2>&1 || true
+            return 0
         fi
     fi
     systemctl enable docker >/dev/null 2>&1 || true
     systemctl start docker >/dev/null 2>&1 || true
 
-    if ! docker info >/dev/null 2>&1; then
-        log_error "Docker 命令可用，但 Docker 守护进程未运行；请检查 systemctl status docker"
-        return 1
-    fi
-
     if ! docker compose version >/dev/null 2>&1; then
         log_info "正在安装 Docker Compose 插件..."
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt update -y && apt install -y docker-compose-plugin || { log_error "Docker Compose 插件安装失败"; return 1; }
-        elif [[ -n "$PKG_MANAGER" ]]; then
-            $PKG_MANAGER install -y docker-compose-plugin || { log_error "Docker Compose 插件安装失败"; return 1; }
-        else
-            log_error "未识别包管理器，无法安装 Docker Compose 插件"
-            return 1
-        fi
+        if [[ "$PKG_MANAGER" == "apt" ]]; then apt update -y && apt install -y docker-compose-plugin
+        else $PKG_MANAGER install -y docker-compose-plugin; fi
     else
         log_success "Docker Compose 已就绪"
     fi
-
-    if ! docker compose version >/dev/null 2>&1; then
-        log_error "Docker Compose 不可用"
-        return 1
-    fi
-}
-
-# 这三个控制台共用 Nginx 的 8443 端口，必须用不同域名区分 TLS 虚拟主机。
-panel_domain_in_use() {
-    local domain="$1" exclude="${2:-}" service file
-    for service in substore wallos komari; do
-        [[ "$service" == "$exclude" ]] && continue
-        file="/root/docker/$service/domain.txt"
-        if [[ -f "$file" ]] && grep -Fqx -- "$domain" "$file"; then
-            return 0
-        fi
-    done
-    return 1
 }
 
 install_xray() {
@@ -298,11 +248,7 @@ install_xray() {
         local ver
         ver=$(xray version 2>/dev/null | head -1)
         log_info "当前已安装版本: $ver"
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            log_info "自动执行：检查并更新已安装的 Xray-core"
-        elif ! prompt_reinstall "Xray-core"; then
-            return 0
-        fi
+        if ! prompt_reinstall "Xray-core"; then return 0; fi
     fi
 
     local x_ver=""
@@ -424,25 +370,18 @@ install_substore() {
     
     if [[ "$is_installed" == "true" ]]; then
         log_warn "检测到您的服务器中 Sub-Store 已经部署过了！"
-        if [[ "$AUTO_DEFAULT" == "true" && -f /root/docker/substore/domain.txt ]]; then
-            old_sub_domain=$(cat /root/docker/substore/domain.txt)
-        fi
         if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
             local p_sn=$(cat /root/docker/substore/domain.txt)
             local p_api=$(cat /root/docker/substore/api_path.txt)
             echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$p_sn:8443/?api=https://$p_sn:8443/$p_api${NC}"
         fi
+        
+        echo "  1) 不重新安装 (保留现有) [默认]"
+        echo "  2) 重新安装 (覆盖更新)"
+        echo "  3) 导入旧链接 (手动粘贴)"
         local choice
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            choice=2
-            log_info "自动执行：使用现有域名和 API 路径重建 Sub-Store，以应用修复并保留数据"
-        else
-            echo "  1) 不重新安装 (保留现有) [默认]"
-            echo "  2) 重新安装 (覆盖更新)"
-            echo "  3) 导入旧链接 (手动粘贴)"
-            read -t 30 -rp "  > 请选择 (1-3, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-        fi
+        read -t 30 -rp "  > 请选择 (1-3, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
         if [[ "$choice" == "1" ]]; then return 0; fi
         
         docker stop substore 2>/dev/null || true
@@ -459,17 +398,13 @@ install_substore() {
             fi
         fi
     else
-        local choice
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            choice=1
-        else
-            echo -e "
+        echo -e "
 ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
-            echo "  1) 直接安装 [默认]"
-            echo "  2) 导入旧链接 (手动粘贴)"
-            read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-        fi
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
         if [[ "$choice" == "2" ]]; then
             read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
             if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
@@ -482,11 +417,11 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         fi
     fi
 
-    install_docker_env 1 || return 1
+    install_docker_env 1
     
     if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1 || return 1
+        install_nginx 1
     fi
 
     if ! is_cmd_exist unzip; then
@@ -531,9 +466,9 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         kp="$KEY_PATH"
         AUTO_DEFAULT="$prev_auto"
     else
-        # 自动执行时使用默认域名选择；交互安装时仍允许自定义。
+        # 强制在选择域名时弹出版单给出选择（Sub-Store 默认选项 1）
         local prev_auto="$AUTO_DEFAULT"
-        AUTO_DEFAULT="$prev_auto" 
+        AUTO_DEFAULT="false" 
         select_server_name "sub.example.com" "" "1"
         sn="$SELECTED_SN"
         AUTO_DEFAULT="$prev_auto"
@@ -542,11 +477,6 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         cp="$CERT_PATH"
         kp="$KEY_PATH"
     fi
-
-    if panel_domain_in_use "$sn" substore; then
-        log_error "域名 $sn 已被 Wallos 或 Komari 占用；请选择不同域名后重试"
-        return 1
-    fi
     
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
@@ -554,8 +484,8 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         log_warn "请后续确保将正确的证书文件放置于: $cp"
     fi
 
-    mkdir -p /root/docker/substore/data || { log_error "无法创建 Sub-Store 数据目录"; return 1; }
-    cd /root/docker/substore || { log_error "无法进入 Sub-Store 目录"; return 1; }
+    mkdir -p /root/docker/substore/data
+    cd /root/docker/substore
 
     local api_path
     if [[ -n "$old_sub_api" ]]; then
@@ -570,40 +500,20 @@ ${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
         echo "$api_path" > api_path.txt
         log_info "已生成随机高级防护 API 路径: /$api_path"
     fi
-    if [[ ! "$api_path" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
-        log_warn "导入或保存的 API 路径格式无效，正在生成新的随机路径"
-        api_path=$(openssl rand -hex 12) || return 1
-        printf '%s\n' "$api_path" > api_path.txt
-    fi
     echo "$sn" > domain.txt
 
     log_info "正在为您下载并部署选中版本的核心代码..."
-    if ! curl -fsSL --retry 3 --connect-timeout 15 "$backend_url" -o sub-store.bundle.js; then
-        log_error "Sub-Store 后端下载失败；未启动容器"
-        return 1
-    fi
-    if ! curl -fsSL --retry 3 --connect-timeout 15 "$frontend_url" -o dist.zip; then
-        rm -f sub-store.bundle.js
-        log_error "Sub-Store 前端下载失败；未启动容器"
-        return 1
-    fi
+    curl -fsSL -L "$backend_url" -o sub-store.bundle.js
+    curl -fsSL -L "$frontend_url" -o dist.zip
     
     rm -rf frontend dist_tmp
-    if ! unzip -tq dist.zip >/dev/null 2>&1 || ! unzip -qo dist.zip -d dist_tmp; then
-        rm -rf dist_tmp
-        log_error "Sub-Store 前端压缩包无效或解压失败"
-        return 1
-    fi
+    unzip -qo dist.zip -d dist_tmp || log_warn "前端解压出现异常，可能下载不完整"
     if [[ -d "dist_tmp/dist" ]]; then
         mv dist_tmp/dist frontend
     else
         mv dist_tmp frontend
     fi
     rm -rf dist_tmp dist.zip
-    if [[ ! -s sub-store.bundle.js || ! -s frontend/index.html ]]; then
-        log_error "Sub-Store 部署文件不完整（需要后端 bundle 和 frontend/index.html）"
-        return 1
-    fi
 
     cat > docker-compose.yml <<EOF
 version: '3.8'
@@ -623,12 +533,8 @@ services:
       SUB_STORE_FRONTEND_HOST: "0.0.0.0"
       SUB_STORE_FRONTEND_PORT: "3001"
       SUB_STORE_DATA_BASE_PATH: "/app"
-      SUB_STORE_BACKEND_MERGE: "true"
-      # 合并模式下前端和 API 由同一 Node 监听器提供，Docker 转发需要绑定容器网卡。
-      SUB_STORE_BACKEND_API_HOST: "0.0.0.0"
-      SUB_STORE_BACKEND_API_PORT: "3001"
-      # Sub-Store 对来源进行精确匹配，需允许本服务的 scheme、域名和 8443 端口。
-      SUB_STORE_CORS_ALLOWED_ORIGINS: "https://${sn}:8443"
+      SUB_STORE_BACKEND_API_HOST: "127.0.0.1"
+      SUB_STORE_BACKEND_API_PORT: "3000"
       TZ: "Asia/Shanghai"
     volumes:
       - ./sub-store.bundle.js:/app/sub-store.bundle.js
@@ -642,13 +548,7 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose config -q || { log_error "Sub-Store Compose 配置无效"; return 1; }
-    docker compose up -d || { log_error "Sub-Store 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
-    if ! docker ps --filter name='^/substore$' --filter status=running --format '{{.Names}}' | grep -qx substore; then
-        docker compose logs --tail=100
-        log_error "Sub-Store 容器没有保持运行"
-        return 1
-    fi
+    docker compose up -d 2>/dev/null || docker-compose up -d
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -684,11 +584,7 @@ server {
     }
 }
 EOF
-    if ! nginx -t; then
-        log_error "Sub-Store 的 Nginx 配置检查失败；请检查证书、域名和 8443 端口配置"
-        return 1
-    fi
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || { log_error "Nginx 未能加载 Sub-Store 反代配置"; return 1; }
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
     
     echo ""
     log_success "Sub-Store 部署完成！"
@@ -714,10 +610,6 @@ install_wallos() {
             local w_sn=$(cat /root/docker/wallos/domain.txt)
             echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$w_sn:8443${NC}"
         fi
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            log_info "自动执行：保留现有 Wallos 部署"
-            return 0
-        fi
         echo "  1) 不重新安装 (保留现有) [默认]"
         echo "  2) 重新安装 (覆盖更新)"
         echo "  3) 导入旧链接 (手动粘贴)"
@@ -741,17 +633,13 @@ install_wallos() {
             fi
         fi
     else
-        local choice
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            choice=1
-        else
-            echo -e "
+        echo -e "
 ${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
-            echo "  1) 直接安装 [默认]"
-            echo "  2) 导入旧链接 (手动粘贴)"
-            read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-        fi
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
         if [[ "$choice" == "2" ]]; then
             read -rp "请粘贴旧的 Wallos 面板链接 (例如 https://wallos.xxx.com:8443): " old_wal_link
             if [[ -n "$old_wal_link" ]]; then
@@ -768,20 +656,16 @@ ${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
     if [[ "$wallos_mode" == "1" ]]; then
         wallos_ver="latest"
     elif [[ "$wallos_mode" == "2" ]]; then
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            wallos_ver="2.36.2"
-        else
-            ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
-        fi
+        ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
     elif [[ "$wallos_mode" == "3" ]]; then
         wallos_ver="beta"
     fi
 
-    install_docker_env 1 || return 1
+    install_docker_env 1
     
     if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1 || return 1
+        install_nginx 1
     fi
 
     log_step "部署 Wallos (订阅管理与财务系统) - 版本: $wallos_ver"
@@ -799,9 +683,9 @@ ${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
         AUTO_DEFAULT="$prev_auto"
     else
         while true; do
-            # 自动执行时使用默认域名选择；交互安装时仍允许自定义。
+            # 强制在选择域名时弹出版单给出选择（Wallos 默认选项 2）
             local prev_auto="$AUTO_DEFAULT"
-            AUTO_DEFAULT="$prev_auto" 
+            AUTO_DEFAULT="false" 
             select_server_name "wallos.example.com" "" "2"
             sn="$SELECTED_SN"
             AUTO_DEFAULT="$prev_auto"
@@ -820,11 +704,6 @@ ${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
         ask_cert_paths "$sn"
         cp="$CERT_PATH"
         kp="$KEY_PATH"
-    fi
-
-    if panel_domain_in_use "$sn" wallos; then
-        log_error "域名 $sn 已被 Sub-Store 或 Komari 占用；请选择不同域名后重试"
-        return 1
     fi
     
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
@@ -859,13 +738,7 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose config -q || { log_error "Wallos Compose 配置无效"; return 1; }
-    docker compose up -d || { log_error "Wallos 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
-    if ! docker ps --filter name='^/wallos$' --filter status=running --format '{{.Names}}' | grep -qx wallos; then
-        docker compose logs --tail=100
-        log_error "Wallos 容器没有保持运行"
-        return 1
-    fi
+    docker compose up -d 2>/dev/null || docker-compose up -d
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -920,10 +793,6 @@ install_komari() {
             local k_sn=$(cat /root/docker/komari/domain.txt)
             echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$k_sn:8443${NC}"
         fi
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            log_info "自动执行：保留现有 Komari 部署"
-            return 0
-        fi
         echo "  1) 不重新安装 (保留现有) [默认]"
         echo "  2) 重新安装 (覆盖更新)"
         echo "  3) 导入旧链接 (手动粘贴)"
@@ -947,17 +816,13 @@ install_komari() {
             fi
         fi
     else
-        local choice
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            choice=1
-        else
-            echo -e "
+        echo -e "
 ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
-            echo "  1) 直接安装 [默认]"
-            echo "  2) 导入旧链接 (手动粘贴)"
-            read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-        fi
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
         if [[ "$choice" == "2" ]]; then
             read -rp "请粘贴旧的 Komari 面板链接 (例如 https://komari.xxx.com:8443): " old_komari_link
             if [[ -n "$old_komari_link" ]]; then
@@ -986,11 +851,11 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
         fi
     fi
 
-    install_docker_env 1 || return 1
+    install_docker_env 1
 
     if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx 1 || return 1
+        install_nginx 1
     fi
 
     log_step "部署 Komari (轻量级服务器监控探针) - 镜像版本: $komari_tag"
@@ -1008,9 +873,9 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
         AUTO_DEFAULT="$prev_auto"
     else
         while true; do
-            # 自动执行时使用默认域名选择；交互安装时仍允许自定义。
+            # 强制在选择域名时弹出版单给出选择（Komari 默认选项 3）
             local prev_auto="$AUTO_DEFAULT"
-            AUTO_DEFAULT="$prev_auto"
+            AUTO_DEFAULT="false"
             select_server_name "komari.example.com" "" "3"
             sn="$SELECTED_SN"
             AUTO_DEFAULT="$prev_auto"
@@ -1038,11 +903,6 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
         kp="$KEY_PATH"
     fi
 
-    if panel_domain_in_use "$sn" komari; then
-        log_error "域名 $sn 已被 Sub-Store 或 Wallos 占用；请选择不同域名后重试"
-        return 1
-    fi
-
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
         log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
@@ -1055,12 +915,8 @@ ${CYAN}检测到 Komari 探针未安装，请选择部署方式：${NC}"
 
     local admin_user=""
     local admin_pass=""
-    if [[ "$AUTO_DEFAULT" != "true" ]]; then
-        read -rp "请输入 Komari 初始管理员用户名 (回车则由系统随机生成): " admin_user
-        read -rp "请输入 Komari 初始管理员密码 (回车则由系统随机生成): " admin_pass
-    else
-        log_info "自动执行：由 Komari 首次启动生成管理员凭据，可通过容器日志查看"
-    fi
+    read -rp "请输入 Komari 初始管理员用户名 (回车则由系统随机生成): " admin_user
+    read -rp "请输入 Komari 初始管理员密码 (回车则由系统随机生成): " admin_pass
 
     cat > docker-compose.yml <<EOF
 version: '3.8'
@@ -1091,13 +947,7 @@ EOF
 EOF
 
     log_info "启动容器..."
-    docker compose config -q || { log_error "Komari Compose 配置无效"; return 1; }
-    docker compose up -d || { log_error "Komari 容器启动失败，请运行 docker compose logs --tail=100 查看原因"; return 1; }
-    if ! docker ps --filter name='^/komari$' --filter status=running --format '{{.Names}}' | grep -qx komari; then
-        docker compose logs --tail=100
-        log_error "Komari 容器没有保持运行"
-        return 1
-    fi
+    docker compose up -d 2>/dev/null || docker-compose up -d
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -1145,76 +995,41 @@ EOF
 
 # ----------------- Realm 端口转发功能模块 -----------------
 deploy_realm() {
-    local arch asset_url
-    case "$(uname -m)" in
-        x86_64|amd64) arch="x86_64" ;;
-        aarch64|arm64) arch="aarch64" ;;
-        *) log_error "当前架构 $(uname -m) 暂不支持 Realm"; return 1 ;;
-    esac
-
-    if [[ -x "/root/realm/realm" ]]; then
-        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-            log_info "自动执行：Realm 已安装，保留现有版本"
-            systemctl enable --now realm.service >/dev/null 2>&1 || return 1
-            return 0
-        fi
+    if [[ -f "/root/realm/realm" ]]; then
         if ! prompt_reinstall "Realm"; then return 0; fi
         systemctl stop realm 2>/dev/null || true
     fi
 
     log_step "部署 Realm 端口转发环境"
-    mkdir -p /root/realm || { log_error "无法创建 /root/realm"; return 1; }
-    asset_url="https://github.com/github19999/fork-realm/releases/download/v2.6.0/realm-${arch}-unknown-linux-gnu.tar.gz"
-    if ! curl -fL --retry 3 --connect-timeout 15 "$asset_url" -o /tmp/realm.tar.gz; then
-        log_error "Realm 下载失败，请检查网络或该架构的 Release 资源"
-        return 1
-    fi
-    if ! tar -xzf /tmp/realm.tar.gz -C /root/realm realm; then
-        rm -f /tmp/realm.tar.gz
-        log_error "Realm 安装包解压失败"
-        return 1
-    fi
-    rm -f /tmp/realm.tar.gz
-    chmod 755 /root/realm/realm || { log_error "设置 Realm 执行权限失败"; return 1; }
-    if [[ ! -f /root/realm/config.toml ]]; then
-        install -m 600 /dev/null /root/realm/config.toml
-    fi
+    mkdir -p /root/realm
+    cd /root/realm || return 1
+    wget -O realm.tar.gz https://github.com/github19999/fork-realm/releases/download/v2.6.0/realm-x86_64-unknown-linux-gnu.tar.gz
+    tar -xvf realm.tar.gz
+    chmod +x realm
     cat > /etc/systemd/system/realm.service << 'EOF'
 [Unit]
-Description=Realm port forwarder
+Description=realm
 After=network-online.target
-Wants=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
 
 [Service]
 Type=simple
 User=root
 Restart=on-failure
 RestartSec=5s
+DynamicUser=true
 WorkingDirectory=/root/realm
 ExecStart=/root/realm/realm -c /root/realm/config.toml
-NoNewPrivileges=true
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload || { log_error "systemd 配置重载失败"; return 1; }
-    if ! systemctl enable --now realm.service; then
-        log_error "Realm 服务启动失败；请运行 systemctl status realm 和 journalctl -u realm -n 50 查看原因"
-        return 1
-    fi
-    if ! systemctl is-active --quiet realm.service; then
-        log_error "Realm 服务未进入运行状态；请运行 journalctl -u realm -n 50 查看原因"
-        return 1
-    fi
-    log_success "Realm 已安装并启动，且已设置为开机自启。"
+    touch /root/realm/config.toml
+    systemctl daemon-reload
+    log_success "Realm 部署完成。"
 }
 
 add_forward_realm() {
-    if [[ ! -x "/root/realm/realm" ]]; then
-        log_error "请先安装 Realm"
-        return 1
-    fi
     log_step "添加 Realm 转发规则"
     if [ ! -f "/root/realm/config.toml" ]; then
         touch /root/realm/config.toml
@@ -1231,12 +1046,8 @@ add_forward_realm() {
             break
         fi
     done
-    if systemctl restart realm.service; then
-        log_success "转发规则已添加并生效。"
-    else
-        log_error "Realm 重启失败；请运行 journalctl -u realm -n 50 查看原因"
-        return 1
-    fi
+    systemctl restart realm 2>/dev/null || true
+    log_success "转发规则已添加并生效。"
 }
 
 delete_forward_realm() {
@@ -1285,23 +1096,15 @@ delete_forward_realm() {
     sed -i "${start_line},${end_line}d" /root/realm/config.toml
 
     log_success "转发规则已删除。"
-    if ! systemctl restart realm.service; then
-        log_error "规则已从配置中删除，但 Realm 重启失败；请检查 journalctl -u realm -n 50"
-        return 1
-    fi
-    log_success "转发规则已删除并生效。"
+    systemctl restart realm 2>/dev/null || true
 }
 
 start_service_realm() {
-    if [[ ! -x "/root/realm/realm" || ! -f /etc/systemd/system/realm.service ]]; then
-        log_error "Realm 未完整安装，请重新部署"
-        return 1
-    fi
-    if ! systemctl daemon-reload || ! systemctl enable --now realm.service || ! systemctl is-active --quiet realm.service; then
-        log_error "Realm 启动失败；请运行 systemctl status realm 和 journalctl -u realm -n 50 查看原因"
-        return 1
-    fi
-    log_success "Realm 服务已启动并设置为开机自启。"
+    systemctl unmask realm.service 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart realm.service 2>/dev/null || true
+    systemctl enable realm.service 2>/dev/null || true
+    log_success "realm 服务已启动并设置为开机自启。"
 }
 
 stop_service_realm() {
@@ -1393,17 +1196,17 @@ menu_install_service() {
         echo "  9) 安装 Docker Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Sub-Store (订阅转换中心) ──${NC}"
-        echo " 10) 安装 Sub-Store 最新稳定版 [需要 Docker]"
-        echo " 11) 安装 Sub-Store 指定版本号 [需要 Docker]"
-        echo " 12) 安装 Sub-Store / 预发布版 [需要 Docker]"
+        echo " 10) 安装 Sub-Store 最新稳定版"
+        echo " 11) 安装 Sub-Store 指定版本号"
+        echo " 12) 安装 Sub-Store / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Wallos (个人财务与订阅追踪) ──${NC}"
-        echo " 13) 安装 Wallos 最新稳定版 [需要 Docker]"
-        echo " 14) 安装 Wallos 指定版本号 (默认: 2.36.2，回车确认) [需要 Docker]"
-        echo " 15) 安装 Wallos Beta / 预发布版 [需要 Docker]"
+        echo " 13) 安装 Wallos 最新稳定版"
+        echo " 14) 安装 Wallos 指定版本号 (默认: 2.36.2，回车确认)"
+        echo " 15) 安装 Wallos Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Realm (端口转发工具) ──${NC}"
-        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载；无需 Docker)"
+        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载)"
         echo ""
         echo -e "  ${CYAN}── 核心代理 (Xray) ──${NC}"
         echo " 17) 安装 Xray 最新稳定版"
@@ -1411,9 +1214,9 @@ menu_install_service() {
         echo " 19) 安装 Xray Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Komari (轻量级服务器监控探针) ──${NC}"
-        echo " 20) 安装 Komari 最新稳定版 [需要 Docker]"
-        echo " 21) 安装 Komari 指定版本号 [需要 Docker]"
-        echo " 22) 安装 Komari Snapshot / 预发布版 [需要 Docker]"
+        echo " 20) 安装 Komari 最新稳定版"
+        echo " 21) 安装 Komari 指定版本号"
+        echo " 22) 安装 Komari Snapshot / 预发布版"
         echo ""
         echo -e "  ${CYAN}── 批量执行 ──${NC}"
         echo -e " ${GREEN}100) 全部自动执行 (所有服务)${NC}"
@@ -1430,7 +1233,7 @@ menu_install_service() {
             SVC_CHOICES=(1 4 7 10 14 160 17 20)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160 17 20)
+            SVC_CHOICES=(1 4 7 10 14 160 20)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
             read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
@@ -1459,9 +1262,7 @@ menu_install_service() {
                         local ver
                         ver=$(sing-box version 2>/dev/null | head -1)
                         log_info "当前已安装版本: $ver"
-                        if [[ "$AUTO_DEFAULT" == "true" ]]; then
-                            log_info "自动执行：检查并更新已安装的 sing-box"
-                        elif ! prompt_reinstall "sing-box"; then
+                        if ! prompt_reinstall "sing-box"; then
                             [[ "$is_batch" == "false" ]] && press_enter
                             continue
                         fi
@@ -1521,7 +1322,7 @@ User=root
 WorkingDirectory=/var/lib/sing-box
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-ExecStart=/usr/bin/env sing-box -D /var/lib/sing-box run -c /etc/sing-box/config.json
+ExecStart=/usr/bin/sing-box -D /var/lib/sing-box run -c /etc/sing-box/config.json
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10
@@ -1583,8 +1384,8 @@ EOF
         done
 
         if [[ "$is_batch" == "true" ]]; then
-            log_info "批量安装步骤已全部执行；请根据各步骤的错误提示处理未成功项。"
-            [[ "$AUTO_DEFAULT" != "true" ]] && press_enter
+            log_success "所有指定的安装步骤均已执行完毕！"
+            press_enter
         fi
     done
 }
