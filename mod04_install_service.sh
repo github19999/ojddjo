@@ -60,6 +60,9 @@
 #         原 compose 固定使用 node:20.18.0，运行环境过旧。→ 现统一改为 node:24.15.0。
 #         已部署的旧面板：菜单 23 → 选 4「保持当前版本，仅应用配置修复」即可自动改为 Node 24 并重建容器（数据不丢）。
 #
+# 【7. 新装系统 apt 被占用】系统刚装好时开机自动更新常占用 dpkg 锁，导致 sing-box/Nginx/Docker 全部安装失败。
+#   现在执行安装前会自动等待锁释放（最多 15 分钟，不会删除任何锁文件）。
+#
 # 本次未改动：域名选择/证书询问/导入旧链接/冲突检测/菜单批量执行(100/101/102)/Nginx 反代配置内容/各卸载逻辑。
 # ════════════════════════════════════════════════════════════════════
 
@@ -92,6 +95,23 @@ m4_hold_pkg() {
 m4_unhold_pkg() {
     [[ "$PKG_MANAGER" == "apt" ]] || return 0
     apt-mark unhold "$@" >/dev/null 2>&1 || true
+}
+
+# 等待系统里其他 apt/dpkg 进程（如刚装完系统的开机自动更新）释放锁，最多 15 分钟；绝不删除锁文件
+m4_wait_apt_lock() {
+    [[ "$PKG_MANAGER" == "apt" ]] || return 0
+    local i=0 max=900 who
+    while pgrep -x 'apt|apt-get|aptitude|dpkg|unattended-upgr' >/dev/null 2>&1; do
+        if (( i == 0 )); then
+            who=$(pgrep -x 'apt|apt-get|aptitude|dpkg|unattended-upgr' | head -1)
+            log_warn "检测到系统正在运行其他包管理任务 (pid ${who}: $(ps -p "$who" -o comm= 2>/dev/null))，通常是新系统的开机自动更新，等待其结束..."
+        fi
+        (( i >= max )) && { log_error "等待超过 15 分钟仍被占用，请手动检查: ps -fp \$(pgrep -x 'apt|apt-get|dpkg|unattended-upgr' | head -1)"; return 1; }
+        sleep 5; i=$((i + 5))
+        (( i % 60 == 0 )) && log_info "仍在等待 apt 锁释放 (${i}s)..."
+    done
+    (( i > 0 )) && log_success "apt 锁已释放，继续执行"
+    return 0
 }
 
 # 备份目录为 tar.gz（保留最近 3 份）
@@ -2225,6 +2245,7 @@ menu_install_service() {
             sleep 1
         fi
 
+        m4_wait_apt_lock || { press_enter; continue; }   # 优化5：先等待 apt 锁释放，避免新系统刚装完时安装全部失败
         for vc in "${SVC_CHOICES[@]}"; do
             case $vc in
                 0) return ;;
