@@ -55,6 +55,11 @@
 #     现安装/更新后自动 apt-mark hold sing-box，仅在你通过本脚本更新时临时解除。
 #   - Xray / Realm：二进制由本脚本管理，不带任何自更新任务。
 #
+# 【6. 修复 Sub-Store「Failed to download gist data / reading 'redirect'」】
+#   根因：新版后端(2.42.x)依赖 Node 24（官方 runtime-manifest 标注 testedNode=24.x，并使用 node:sqlite 等新特性），
+#         原 compose 固定使用 node:20.18.0，运行环境过旧。→ 现统一改为 node:24.15.0。
+#         已部署的旧面板：菜单 23 → 选 4「保持当前版本，仅应用配置修复」即可自动改为 Node 24 并重建容器（数据不丢）。
+#
 # 本次未改动：域名选择/证书询问/导入旧链接/冲突检测/菜单批量执行(100/101/102)/Nginx 反代配置内容/各卸载逻辑。
 # ════════════════════════════════════════════════════════════════════
 
@@ -601,6 +606,8 @@ EOF
 # ────────────────────────────────────────────────────────────────
 SB_BACK_TAG=""
 SB_FRONT_TAG=""
+# 运行 Sub-Store 后端的 Node 版本：2.42.x 后端按 Node 24 测试，Node 20 下“从 Gist 下载”会报 reading 'redirect'（已实测修复）
+SB_NODE_TAG="24.15.0"
 
 m4_sb_back_url() {
     if [[ "$1" == "latest" ]]; then echo "https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js"
@@ -725,7 +732,7 @@ m4_substore_write_compose() {
 version: '3.8'
 services:
   substore:
-    image: node:20.18.0
+    image: node:${SB_NODE_TAG}
     container_name: substore
     restart: unless-stopped
     working_dir: /app
